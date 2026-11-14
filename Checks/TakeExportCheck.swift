@@ -9,38 +9,6 @@ struct TakeExportCheck {
         if !ok { throw NSError(domain: "TakeExportCheck", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
 
-    static func video(_ url: URL) async throws {
-        let writer = try AVAssetWriter(outputURL: url, fileType: .mov)
-        let input = AVAssetWriterInput(mediaType: .video, outputSettings: [
-            AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: 320, AVVideoHeightKey: 192,
-            AVVideoCompressionPropertiesKey: [AVVideoAllowFrameReorderingKey: false]
-        ])
-        input.transform = CGAffineTransform(a: 0, b: 1, c: -1, d: 0, tx: 192, ty: 0)
-        let adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input,
-            sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA])
-        writer.add(input)
-        try require(writer.startWriting(), "Unable to start fixture writer.")
-        writer.startSession(atSourceTime: .zero)
-        for i in 0..<48 {
-            while !input.isReadyForMoreMediaData {
-                guard writer.status == .writing else { throw writer.error ?? TakeExport.ExportError("Writer stopped.") }
-                try await Task.sleep(nanoseconds: 1_000_000)
-            }
-            var buffer: CVPixelBuffer?
-            let result = CVPixelBufferCreate(nil, 320, 192, kCVPixelFormatType_32BGRA, nil, &buffer)
-            try require(result == kCVReturnSuccess, "Cannot allocate video frame.")
-            guard let buffer else { throw TakeExport.ExportError("No pixel buffer.") }
-            CVPixelBufferLockBaseAddress(buffer, [])
-            memset(CVPixelBufferGetBaseAddress(buffer)!, Int32(i * 4), CVPixelBufferGetBytesPerRow(buffer) * 192)
-            CVPixelBufferUnlockBaseAddress(buffer, [])
-            try require(adaptor.append(buffer, withPresentationTime: CMTime(value: Int64(i), timescale: 24)), "Frame write failed.")
-        }
-        writer.endSession(atSourceTime: CMTime(value: 2, timescale: 1))
-        input.markAsFinished()
-        await writer.finishWriting()
-        try require(writer.status == .completed, writer.error?.localizedDescription ?? "Video fixture failed.")
-    }
-
     static func audio(_ url: URL) throws {
         let fmt = AVAudioFormat(standardFormatWithSampleRate: 48_000, channels: 1)!
         let file = try AVAudioFile(forWriting: url, settings: fmt.settings)
@@ -60,7 +28,8 @@ struct TakeExportCheck {
         reader.add(out)
         try require(reader.startReading(), "Cannot read compressed track.")
         var result: [Data] = []
-        while let sample = out.copyNextSampleBuffer(), let block = CMSampleBufferGetDataBuffer(sample) {
+        while let sample = out.copyNextSampleBuffer() {
+            guard let block = CMSampleBufferGetDataBuffer(sample), CMBlockBufferGetDataLength(block) > 0 else { continue }
             var data = Data(count: CMBlockBufferGetDataLength(block))
             let status = data.withUnsafeMutableBytes { (bytes: UnsafeMutableRawBufferPointer) in
                 CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: bytes.count, destination: bytes.baseAddress!)
@@ -68,16 +37,43 @@ struct TakeExportCheck {
             try require(status == noErr, "Cannot read video sample.")
             result.append(data)
         }
-        try require(reader.status == .completed && !result.isEmpty, "Incomplete video sample read.")
+        try require(reader.status == .completed && !result.isEmpty, "Incomplete video sample read (\(result.count) packets, status \(reader.status.rawValue), \(reader.error?.localizedDescription ?? "no error")).")
         return result
     }
 
+    static func checkStream() throws {
+        let fixture = try Data(contentsOf: URL(fileURLWithPath: "Checks/stream-tone.mp3"))
+        var frames = 0, peak: Float = 0, crossings = 0, previous: Float = 0
+        var rate = 0.0
+        let decoder = try IncrementalDecoder { pcm in
+            guard let samples = pcm.floatChannelData?[0] else { throw TakeError("Missing decoded audio.") }
+            rate = pcm.format.sampleRate
+            for i in 0..<Int(pcm.frameLength) {
+                let value = samples[i]
+                peak = max(peak, abs(value))
+                if (22_050..<66_150).contains(frames + i), previous < 0 && value >= 0 { crossings += 1 }
+                previous = value
+            }
+            frames += Int(pcm.frameLength)
+        }
+        var decodedBeforeEOF = false
+        for start in stride(from: 0, to: fixture.count, by: 317) {
+            let end = min(start + 317, fixture.count)
+            try decoder.append(fixture.subdata(in: start..<end))
+            if end <= fixture.count / 2 && frames > 0 { decodedBeforeEOF = true }
+        }
+        try decoder.finish()
+        try require(decodedBeforeEOF && rate == 44_100 && frames >= 80_000 && peak > 0.03 &&
+                    (436...444).contains(crossings), "The chunked two-second MP3 did not decode progressively (\(frames) frames, \(crossings) crossings).")
+    }
+
     static func main() async throws {
+        try checkStream()
         let root = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let mov = root.appendingPathComponent("camera.mov"), caf = root.appendingPathComponent("sound.caf")
-        try await video(mov)
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "Checks/camera.mov"), to: mov)
         try audio(caf)
         let original = AVURLAsset(url: mov), cam = try await original.loadTracks(withMediaType: .video).first!
         let frameData = try packets(original, cam)

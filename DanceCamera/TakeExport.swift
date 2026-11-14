@@ -1,5 +1,10 @@
 import AVFoundation
 
+struct TakeError: LocalizedError {
+    let errorDescription: String?
+    init(_ message: String) { errorDescription = message }
+}
+
 enum TakeExport {
     struct ExportError: LocalizedError {
         let errorDescription: String?

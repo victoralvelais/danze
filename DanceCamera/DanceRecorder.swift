@@ -1,11 +1,6 @@
 import SwiftUI
 import AVFoundation
 
-struct TakeError: LocalizedError {
-    let errorDescription: String?
-    init(_ message: String) { errorDescription = message }
-}
-
 enum TakePhase { case idle, starting, recording, saving }
 
 @MainActor
