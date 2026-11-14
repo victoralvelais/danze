@@ -5,3 +5,4 @@ xcuserdata/
 *.xcarchive/
 *.ipa
 .DS_Store
+/release/
