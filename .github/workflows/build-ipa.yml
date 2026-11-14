@@ -1,0 +1,54 @@
+name: Build DanceCamera IPA
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      APP: DanceCamera
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build iPhone Release target
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcodebuild -version
+          xcodebuild -project "$APP.xcodeproj" -target "$APP" \
+            -configuration Release -sdk iphoneos ARCHS=arm64 ONLY_ACTIVE_ARCH=NO \
+            CODE_SIGNING_ALLOWED=NO CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/products" \
+            OBJROOT="$RUNNER_TEMP/intermediates" build
+
+      - name: Package and verify IPA
+        shell: bash
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/products/$APP.app"
+          executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")"
+          test -x "$bundle/$executable"
+          xcrun lipo -verify_arch arm64 "$bundle/$executable"
+          xcrun vtool -show-build "$bundle/$executable" | grep -Eq 'platform[[:space:]]+IOS[[:space:]]*$'
+
+          mkdir -p "$RUNNER_TEMP/package/Payload"
+          /usr/bin/ditto "$bundle" "$RUNNER_TEMP/package/Payload/$APP.app"
+          cd "$RUNNER_TEMP/package"
+          /usr/bin/zip -q -r -y "$RUNNER_TEMP/$APP.ipa" Payload
+          unzip -tq "$RUNNER_TEMP/$APP.ipa"
+          unzip -Z1 "$RUNNER_TEMP/$APP.ipa" | grep -Fx "Payload/$APP.app/$executable"
+          unzip -Z1 "$RUNNER_TEMP/$APP.ipa" | grep -Fx "Payload/$APP.app/Info.plist"
+
+      - name: Upload IPA
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          path: ${{ runner.temp }}/DanceCamera.ipa
+          archive: false
+          if-no-files-found: error

@@ -1,0 +1,194 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {};
+	objectVersion = 56;
+	objects = {
+		AAAAAAAAAAAAAAAAAAAAAA68 = {
+			isa = PBXFileReference;
+			lastKnownFileType = text.plist.xml;
+			path = Info.plist;
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAA66 = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = Navidrome.swift;
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAACA = {
+			isa = PBXBuildFile;
+			fileRef = AAAAAAAAAAAAAAAAAAAAAA66;
+		};
+		AAAAAAAAAAAAAAAAAAAAAA67 = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = MusicLibrary.swift;
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAACB = {
+			isa = PBXBuildFile;
+			fileRef = AAAAAAAAAAAAAAAAAAAAAA67;
+		};
+		AAAAAAAAAAAAAAAAAAAAAA64 = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = DanceCameraApp.swift;
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAAC8 = {
+			isa = PBXBuildFile;
+			fileRef = AAAAAAAAAAAAAAAAAAAAAA64;
+		};
+		AAAAAAAAAAAAAAAAAAAAAA65 = {
+			isa = PBXFileReference;
+			lastKnownFileType = sourcecode.swift;
+			path = DanceRecorder.swift;
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAAC9 = {
+			isa = PBXBuildFile;
+			fileRef = AAAAAAAAAAAAAAAAAAAAAA65;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA1 = {
+			isa = PBXProject;
+			attributes = { LastUpgradeCheck = 1620; };
+			buildConfigurationList = AAAAAAAAAAAAAAAAAAAAAAAA;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			knownRegions = (en, Base,);
+			mainGroup = AAAAAAAAAAAAAAAAAAAAAAA2;
+			productRefGroup = AAAAAAAAAAAAAAAAAAAAAAA4;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (AAAAAAAAAAAAAAAAAAAAAAA5,);
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA2 = {
+			isa = PBXGroup;
+			children = (AAAAAAAAAAAAAAAAAAAAAAA3, AAAAAAAAAAAAAAAAAAAAAAA4,);
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA3 = {
+			isa = PBXGroup;
+			children = (AAAAAAAAAAAAAAAAAAAAAA64, AAAAAAAAAAAAAAAAAAAAAA65, AAAAAAAAAAAAAAAAAAAAAA66, AAAAAAAAAAAAAAAAAAAAAA67, AAAAAAAAAAAAAAAAAAAAAA68,);
+			path = DanceCamera;
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA4 = {
+			isa = PBXGroup;
+			children = (AAAAAAAAAAAAAAAAAAAAAAA6,);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA5 = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = AAAAAAAAAAAAAAAAAAAAAAAB;
+			buildPhases = (AAAAAAAAAAAAAAAAAAAAAAA7, AAAAAAAAAAAAAAAAAAAAAAA8, AAAAAAAAAAAAAAAAAAAAAAA9,);
+			buildRules = ();
+			dependencies = ();
+			name = DanceCamera;
+			productName = DanceCamera;
+			productReference = AAAAAAAAAAAAAAAAAAAAAAA6;
+			productType = "com.apple.product-type.application";
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA6 = {
+			isa = PBXFileReference;
+			explicitFileType = wrapper.application;
+			includeInIndex = 0;
+			path = DanceCamera.app;
+			sourceTree = BUILT_PRODUCTS_DIR;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA7 = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (AAAAAAAAAAAAAAAAAAAAAAC8, AAAAAAAAAAAAAAAAAAAAAAC9, AAAAAAAAAAAAAAAAAAAAAACA, AAAAAAAAAAAAAAAAAAAAAACB,);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA8 = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAA9 = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = ();
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAAA = {
+			isa = XCConfigurationList;
+			buildConfigurations = (AAAAAAAAAAAAAAAAAAAAAAAC, AAAAAAAAAAAAAAAAAAAAAAAD,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAAB = {
+			isa = XCConfigurationList;
+			buildConfigurations = (AAAAAAAAAAAAAAAAAAAAAAAE, AAAAAAAAAAAAAAAAAAAAAAAF,);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAAC = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+			};
+			name = Debug;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAAD = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ENABLE_MODULES = YES;
+				IPHONEOS_DEPLOYMENT_TARGET = 18.2;
+				SDKROOT = iphoneos;
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAAE = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DanceCamera/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Dance Camera";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Record a dance take using the rear camera.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.codexxp.dancecamera;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Debug;
+		};
+		AAAAAAAAAAAAAAAAAAAAAAAF = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = DanceCamera/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "Dance Camera";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Record a dance take using the rear camera.";
+				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
+				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
+				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
+				MARKETING_VERSION = 0.1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.codexxp.dancecamera;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				TARGETED_DEVICE_FAMILY = 1;
+			};
+			name = Release;
+		};
+	};
+	rootObject = AAAAAAAAAAAAAAAAAAAAAAA1;
+}
