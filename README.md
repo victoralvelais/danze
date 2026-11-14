@@ -2,7 +2,7 @@
 
 The `dance` project agent maintains this iPhone app. Choose a song from Navidrome, record a dancer while the phone plays it, and save a portrait MP4 with the same song on its audio track.
 
-Each successful build on `main` publishes `DanceCamera.ipa` to a versioned GitHub Release. After publication, the Windows delivery runner downloads that release to `release/v<version>-build.<number>/DanceCamera.ipa` in this project. On an iPhone running iOS 18.2 or later, open the successful run's **Artifacts**, download the IPA, and import it using **+** in LiveContainer. [LiveContainer import guide](https://livecontainer.github.io/docs/installation/standalone#installing-apps)
+Each successful build on `main` publishes `DanceCamera.ipa` to a versioned GitHub Release. After a push from the configured Windows checkout, the local download helper saves that release to `release/v<version>-build.<number>/DanceCamera.ipa` in this project. On an iPhone running iOS 18.2 or later, open the successful run's **Artifacts**, download the IPA, and import it using **+** in LiveContainer. [LiveContainer import guide](https://livecontainer.github.io/docs/installation/standalone#installing-apps)
 
 ## Record a clip
 

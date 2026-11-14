@@ -11,10 +11,6 @@ jobs:
   build:
     permissions:
       contents: write
-    outputs:
-      tag: ${{ steps.publish.outputs.tag }}
-      asset: ${{ steps.publish.outputs.asset }}
-      sha256: ${{ steps.publish.outputs.sha256 }}
     runs-on: macos-26
     timeout-minutes: 25
     env:
@@ -62,7 +58,6 @@ jobs:
           overwrite: true
 
       - name: Publish versioned GitHub Release
-        id: publish
         env:
           GH_TOKEN: ${{ github.token }}
         shell: bash
@@ -88,44 +83,3 @@ jobs:
             gh release create "$tag" "$ipa" --target "$GITHUB_SHA" \
               --title "$APP $version (build $build)" --notes "LiveContainer IPA from commit $GITHUB_SHA."
           fi
-          asset="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" | jq -ec --arg name "$APP.ipa" '[.assets[] | select(.name == $name and .state == "uploaded")] | select(length == 1) | first')"
-          id="$(jq -er .id <<< "$asset")"
-          digest="$(jq -er .digest <<< "$asset")"
-          [[ "$id" =~ ^[0-9]+$ && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
-          printf 'tag=%s\nasset=%s\nsha256=%s\n' "$tag" "$id" "${digest#sha256:}" >> "$GITHUB_OUTPUT"
-
-  deliver:
-    name: Download published IPA to project
-    needs: build
-    runs-on: [self-hosted, windows, codexxp-delivery]
-    timeout-minutes: 10
-    env:
-      TAG: ${{ needs.build.outputs.tag }}
-      ASSET_ID: ${{ needs.build.outputs.asset }}
-      SHA256: ${{ needs.build.outputs.sha256 }}
-      PROJECT_DIR: ${{ vars.IPA_PROJECT_DIR }}
-      GH_TOKEN: ${{ github.token }}
-    steps:
-      - name: Save the published release
-        shell: powershell
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ($env:TAG -cnotmatch '^v[0-9]+(?:\.[0-9]+){0,2}-build\.[1-9][0-9]*$' -or
-              $env:ASSET_ID -notmatch '^[0-9]+$' -or $env:SHA256 -cnotmatch '^[a-f0-9]{64}$') { throw 'Invalid release metadata.' }
-          if (-not $env:PROJECT_DIR -or -not [IO.Path]::IsPathRooted($env:PROJECT_DIR)) { throw 'Set the IPA_PROJECT_DIR repository variable to the local project folder.' }
-          $project = (Get-Item -LiteralPath $env:PROJECT_DIR -ErrorAction Stop).FullName
-          $root = [IO.Directory]::CreateDirectory((Join-Path $project 'release'))
-          $version = [IO.Directory]::CreateDirectory((Join-Path $root.FullName $env:TAG))
-          if (($root.Attributes -bor $version.Attributes) -band [IO.FileAttributes]::ReparsePoint) { throw 'Release directory is a link.' }
-          $target = Join-Path $version.FullName 'DanceCamera.ipa'
-          if ((Test-Path -LiteralPath $target) -and (Get-FileHash -LiteralPath $target).Hash -eq $env:SHA256) { return }
-          $temp = Join-Path $version.FullName ([guid]::NewGuid().ToString() + '.part')
-          try {
-              $url = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/releases/assets/$env:ASSET_ID"
-              "Authorization: Bearer $env:GH_TOKEN" | curl.exe --disable --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --header '@-' --header 'Accept: application/octet-stream' --output $temp $url
-              if ($LASTEXITCODE -ne 0 -or (Get-FileHash -LiteralPath $temp).Hash -ne $env:SHA256) { throw 'Release download or digest verification failed.' }
-              if ([IO.File]::Exists($target)) { [IO.File]::Replace($temp, $target, $null) }
-              else { [IO.File]::Move($temp, $target) }
-          } finally {
-              if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp }
-          }
