@@ -2,6 +2,8 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
+    <key>NSAppleMusicUsageDescription</key>
+    <string>Choose audio from your music library to play and record dance videos.</string>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Find music on your Navidrome server when it is on your local network.</string>
     <key>NSAppTransportSecurity</key>
@@ -10,7 +12,7 @@
         <true/>
     </dict>
     <key>NSPhotoLibraryAddUsageDescription</key>
-    <string>Save a copy of the dance clip you choose to your Photos library.</string>
+    <string>Automatically save finished dance videos to your Photos library.</string>
     <key>UIFileSharingEnabled</key>
     <true/>
     <key>LSSupportsOpeningDocumentsInPlace</key>

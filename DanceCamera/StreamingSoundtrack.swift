@@ -5,6 +5,7 @@ import Foundation
 struct SoundtrackTake {
     let url: URL
     /// Presentation of the first CAF frame, in CMClock host-clock seconds.
+    let speedChanges: [SpeedChange]
     let firstAudioHostTime: TimeInterval
 }
 
@@ -18,6 +19,7 @@ final class StreamingSoundtrack: ObservableObject {
     private var generation = UUID()
 
     func play(_ url: URL, title: String) { start(.file(url), title: title) }
+    func playLibrary(_ url: URL, title: String) { start(.library(url), title: title) }
     func play(_ request: URLRequest, title: String) { start(.network(request), title: title) }
 
     private func start(_ source: MusicSource, title: String) {
@@ -39,6 +41,7 @@ final class StreamingSoundtrack: ObservableObject {
         state = .idle
     }
 
+    func setRate(_ value: Double) { player.setRate(value) }
     func pause() { player.pause() }
     func resume() { player.resume() }
     func beginTake() throws { try player.beginTake() }
@@ -47,7 +50,7 @@ final class StreamingSoundtrack: ObservableObject {
     func discardTake() { player.discardTake() }
 }
 
-private enum MusicSource { case file(URL), network(URLRequest) }
+private enum MusicSource { case file(URL), network(URLRequest), library(URL) }
 
 // A dedicated serial queue owns the parser, converter, playback graph, and network task.
 // Packet/tap callbacks never modify SwiftUI state or touch camera capture queues.
@@ -57,6 +60,12 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private let graph = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private let tap = MusicTap()
+    private let pitch = AVAudioUnitTimePitch()
+    private var rate = 1.0
+    private var outputDelay = 0.0
+    private var nextBuffer: AVAudioPCMBuffer?
+    private var finishingTail = false
+    private var bufferedSeconds: Double { Double(pendingFrames) / (max(1, sampleRate) * rate) }
     private var callback: ((State) -> Void)?
     private var lastState: State?
     private var playbackID = UUID()
@@ -71,11 +80,13 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private var sampleRate = 0.0
     private var localFile: AVAudioFile?
     private var parser: IncrementalDecoder?
+    private var libraryReader: LibraryPCMReader?
     private var configurationObserver: NSObjectProtocol?
 
     override init() {
         super.init()
         graph.attach(node)
+        graph.attach(pitch)
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: graph, queue: nil
         ) { [weak self] _ in
@@ -92,6 +103,20 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
     }
 
+    func setRate(_ value: Double) {
+        queue.async {
+            self.rate = min(2, max(0.5, value))
+            self.pitch.rate = Float(self.rate)
+            if self.running { self.markSpeed(self.rate) }
+            if !self.paused && self.suspended && self.bufferedSeconds < 2 { self.network?.resume(); self.suspended = false }
+        }
+    }
+
+    private func markSpeed(_ value: Double) {
+        let now = AVAudioTime.seconds(forHostTime: mach_absolute_time())
+        tap.speed(value, host: now + outputDelay + pitch.latency)
+    }
+
     func play(_ source: MusicSource, callback: @escaping (State) -> Void) {
         queue.async {
             self.reset()
@@ -106,6 +131,9 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
                     let file = try AVAudioFile(forReading: url)
                     self.localFile = file
                     try self.configure(file.processingFormat)
+                    try self.fillLocal()
+                case .library(let url):
+                    self.libraryReader = try LibraryPCMReader(url)
                     try self.fillLocal()
                 case .network(let request):
                     self.parser = try IncrementalDecoder { [weak self] buffer in
@@ -141,7 +169,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         queue.async {
             guard self.lastState == .playing || self.lastState == .buffering else { return }
             self.paused = true
-            if self.running { self.node.pause() }
+            if self.running { self.node.pause(); self.markSpeed(1) }
             self.running = false
             if let task = self.network, !self.suspended { task.suspend(); self.suspended = true }
             self.report(.paused)
@@ -152,11 +180,11 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         queue.async {
             guard self.paused else { return }
             self.paused = false
-            if self.suspended && (self.sampleRate == 0 || Double(self.pendingFrames) < self.sampleRate * 5) {
+            if self.suspended && (self.bufferedSeconds < 5) {
                 self.network?.resume()
                 self.suspended = false
             }
-            if self.pendingFrames > 0 { self.startNode() } else { self.report(self.eof ? .ended : .buffering) }
+            if self.eof || self.bufferedSeconds >= 0.85 { self.startNode() } else { self.report(.buffering) }
         }
     }
     func beginTake() throws { try queue.sync { try tap.begin() } }
@@ -174,16 +202,18 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private func configure(_ format: AVAudioFormat) throws {
         guard !configured else { return }
         guard format.sampleRate > 0, format.channelCount > 0 else { throw TakeError("No playable audio format.") }
-        graph.connect(node, to: graph.mainMixerNode, format: format)
+        graph.connect(node, to: pitch, format: format)
+        graph.connect(pitch, to: graph.mainMixerNode, format: format)
+        pitch.rate = Float(rate)
         let mixed = graph.mainMixerNode.outputFormat(forBus: 0)
         guard mixed.channelCount > 0, mixed.sampleRate > 0 else { throw TakeError("No audio output is available.") }
         try tap.install(on: graph.mainMixerNode, format: mixed)
         graph.prepare()
+        outputDelay = max(graph.mainMixerNode.outputPresentationLatency, graph.outputNode.presentationLatency,
+                          AVAudioSession.sharedInstance().outputLatency)
+        tap.setLatency(outputDelay)
         try graph.start()
         sampleRate = format.sampleRate
-        // Use one downstream latency estimate; adding hardware and session latencies would count the route twice.
-        tap.setLatency(max(graph.mainMixerNode.outputPresentationLatency, graph.outputNode.presentationLatency,
-                           AVAudioSession.sharedInstance().outputLatency))
         configured = true
     }
 
@@ -194,17 +224,22 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     }
 
     private func reset() {
+        if running { markSpeed(1) }
         playbackID = UUID()
+        nextBuffer = nil
+        finishingTail = false
         network?.cancel()
         session?.invalidateAndCancel()
         network = nil
         session = nil
         parser = nil
         localFile = nil
+        libraryReader = nil
         node.stop()
         graph.stop()
         tap.uninstall(from: graph.mainMixerNode)
         graph.disconnectNodeOutput(node)
+        graph.disconnectNodeOutput(pitch)
         eof = false
         configured = false
         running = false
@@ -222,8 +257,16 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     }
 
     private func fillLocal() throws {
+        if let libraryReader {
+            while !eof && bufferedSeconds < 3 {
+                guard let pcm = try libraryReader.read() else { reachedEOF(); return }
+                try configure(pcm.format)
+                schedule(pcm)
+            }
+            return
+        }
         guard let file = localFile else { return }
-        while !eof && Double(pendingFrames) < 3 * sampleRate {
+        while !eof && bufferedSeconds < 3 {
             guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: 8192) else {
                 throw TakeError("Could not allocate playback audio.")
             }
@@ -233,45 +276,61 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         }
     }
 
+    // Keep one buffer in hand so only the real last buffer waits for hardware playback.
     private func schedule(_ buffer: AVAudioPCMBuffer) {
+        if let previous = nextBuffer { enqueue(previous, last: false) }
+        nextBuffer = buffer
+    }
+
+    private func enqueue(_ buffer: AVAudioPCMBuffer, last: Bool) {
         let id = playbackID
         let count = Int64(buffer.frameLength)
         pendingFrames += count
-        node.scheduleBuffer(buffer, at: nil, options: [], completionCallbackType: .dataPlayedBack) { [weak self] _ in
+        node.scheduleBuffer(buffer, at: nil, options: [], completionCallbackType: last ? .dataPlayedBack : .dataRendered) { [weak self] _ in
             guard let self else { return }
             self.queue.async {
                 guard self.playbackID == id else { return }
                 self.pendingFrames -= count
-                if !self.paused && self.suspended && Double(self.pendingFrames) < self.sampleRate * 2 {
+                if !self.paused && self.suspended && self.bufferedSeconds < 2 {
                     self.network?.resume()
                     self.suspended = false
                 }
                 do { try self.fillLocal() } catch { self.fail(error); return }
-                if self.pendingFrames == 0 && !self.paused {
-                    if self.eof { self.report(.ended) }
-                    else { self.report(.buffering) }
+                if last {
+                    self.running = false
+                    self.tap.speed(1, host: AVAudioTime.seconds(forHostTime: mach_absolute_time()))
+                    self.report(.ended)
+                } else if self.pendingFrames == 0 && !self.paused && !self.finishingTail {
+                    self.node.pause()
+                    self.running = false
+                    self.markSpeed(1)
+                    self.report(.buffering)
                 }
             }
         }
-        if Double(pendingFrames) >= sampleRate * 0.35 || running { startNode() }
-        if let network, !suspended, Double(pendingFrames) >= sampleRate * 5 {
+        if bufferedSeconds >= 0.85 || finishingTail { startNode() }
+        if let network, !suspended, bufferedSeconds >= 5 {
             network.suspend()
             suspended = true
         }
     }
 
     private func startNode() {
-        guard pendingFrames > 0 && !paused else { return }
-        if !running { node.play(); running = true }
+        guard pendingFrames > 0, !paused else { return }
+        if !running {
+            node.play()
+            running = true
+            markSpeed(rate)
+        }
         report(.playing)
     }
 
     private func reachedEOF() {
-        guard configured else { fail(TakeError("The selected stream contained no playable audio.")); return }
+        guard configured, let tail = nextBuffer else { fail(TakeError("The selected stream contained no playable audio.")); return }
         eof = true
-        if !paused {
-            if pendingFrames > 0 { startNode() } else { report(.ended) }
-        }
+        finishingTail = true
+        nextBuffer = nil
+        enqueue(tail, last: true)
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
@@ -320,6 +379,20 @@ private final class MusicTap {
     private let backlog = DispatchSemaphore(value: 48)
     private var history: [Block] = []
     private var epoch = UUID()
+    private var timeline = MixerTimeline()
+    private var speedHistory: [SpeedChange] = []
+    private var recordedSpeeds: [SpeedChange] = []
+
+    func speed(_ rate: Double, host: Double) {
+        writer.async {
+            guard self.speedHistory.last?.rate != rate else { return }
+            let event = SpeedChange(host: host, rate: rate)
+            self.speedHistory.append(event)
+            // Keep one event preceding the pre-roll window.
+            while self.speedHistory.count > 1 && self.speedHistory[1].host < host - 3 { self.speedHistory.removeFirst() }
+            if self.takeOpen { self.recordedSpeeds.append(event) }
+        }
+    }
     private var installed = false
     private var latency = 0.0
     private var takeOpen = false
@@ -333,7 +406,7 @@ private final class MusicTap {
             throw TakeError("The audio mixer has an unsupported output format.")
         }
         let id = UUID()
-        writer.sync { epoch = id; history.removeAll(); latency = 0 }
+        writer.sync { epoch = id; history.removeAll(); timeline = MixerTimeline(); latency = 0 }
         mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, time in
             guard let self, time.isHostTimeValid, buffer.frameLength > 0 else { return }
             guard self.backlog.wait(timeout: .now()) == .success else {
@@ -348,10 +421,13 @@ private final class MusicTap {
             }
             guard let copy = Self.copy(buffer, from: 0) else { self.backlog.signal(); return }
             let timestamp = AVAudioTime.seconds(forHostTime: time.hostTime)
+            let sample = time.isSampleTimeValid ? time.sampleTime : nil
             self.writer.async {
                 defer { self.backlog.signal() }
                 guard self.epoch == id else { return }
-                let block = Block(pcm: copy, host: timestamp + self.latency)
+                let host = self.timeline.position(sample: sample, host: timestamp + self.latency,
+                                                  count: Int(copy.frameLength), rate: copy.format.sampleRate)
+                let block = Block(pcm: copy, host: host)
                 self.history.append(block)
                 while let first = self.history.first, block.host - first.host > 2 {
                     self.history.removeFirst()
@@ -375,6 +451,7 @@ private final class MusicTap {
         try writer.sync {
             guard !takeOpen else { throw TakeError("A soundtrack is already being recorded.") }
             takeOpen = true
+            recordedSpeeds = speedHistory
             writeError = nil
             for block in history { append(block) }
             if let error = writeError { clear(removing: true); throw error }
@@ -388,7 +465,7 @@ private final class MusicTap {
             if let error = writeError { clear(removing: true); throw error }
             let result: SoundtrackTake?
             if let url = destination, let host = origin, let file, file.length > 0 {
-                result = SoundtrackTake(url: url, firstAudioHostTime: host)
+                result = SoundtrackTake(url: url, speedChanges: recordedSpeeds, firstAudioHostTime: host)
             } else { result = nil }
             clear(removing: result == nil)
             return result
@@ -402,6 +479,7 @@ private final class MusicTap {
         origin = nil
         writeError = nil
         takeOpen = false
+        recordedSpeeds = []
     }
 
     private func append(_ block: Block) {
@@ -453,5 +531,43 @@ private final class MusicTap {
             output[channel].update(from: input[channel].advanced(by: start), count: count)
         }
         return pcm
+    }
+}
+
+// Music library URLs can use ipod-library:// and are read through AVAsset.
+private final class LibraryPCMReader {
+    let reader: AVAssetReader
+    let output: AVAssetReaderTrackOutput
+
+    init(_ url: URL) throws {
+        let asset = AVURLAsset(url: url)
+        guard !asset.hasProtectedContent, let track = asset.tracks(withMediaType: .audio).first else {
+            throw TakeError("This Music item does not expose a recordable audio track.")
+        }
+        reader = try AVAssetReader(asset: asset)
+        output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true, AVLinearPCMIsNonInterleaved: true
+        ])
+        guard reader.canAdd(output) else { throw TakeError("This Music track cannot be opened.") }
+        reader.add(output)
+        guard reader.startReading() else { throw reader.error ?? TakeError("Could not read this Music track.") }
+    }
+
+    func read() throws -> AVAudioPCMBuffer? {
+        while let sample = output.copyNextSampleBuffer() {
+            let count = CMSampleBufferGetNumSamples(sample)
+            guard count > 0 else { continue }
+            guard let desc = CMSampleBufferGetFormatDescription(sample),
+                  let pcm = AVAudioPCMBuffer(pcmFormat: AVAudioFormat(cmAudioFormatDescription: desc), frameCapacity: UInt32(count))
+            else { throw TakeError("Unsupported Music audio format.") }
+            pcm.frameLength = UInt32(count)
+            let status = CMSampleBufferCopyPCMDataIntoAudioBufferList(sample, at: 0, frameCount: Int32(count),
+                                                                      into: pcm.mutableAudioBufferList)
+            guard status == noErr else { throw TakeError("Could not decode the selected Music track.") }
+            return pcm
+        }
+        guard reader.status == .completed else { throw reader.error ?? TakeError("Reading the Music track was interrupted.") }
+        return nil
     }
 }

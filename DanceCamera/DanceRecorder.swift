@@ -1,41 +1,36 @@
 import SwiftUI
 import AVFoundation
+import CryptoKit
+import MediaPlayer
 
 enum TakePhase { case idle, starting, recording, saving }
 
 @MainActor
 final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
-    @Published var message = "Starting camera."
+    @Published var message = ""
     @Published private(set) var phase = TakePhase.idle
     @Published private(set) var ready = false
-    @Published private(set) var quality = ""
-    @Published private(set) var takes: [URL] = []
     @Published private(set) var upcoming: [String] = []
-    @Published private(set) var outputName = ""
-    @Published private(set) var correctionMS: Double = 0
+    @Published private(set) var speed = 1.0
+    @Published var originalTempo = false
+    let photos = PhotoDelivery()
     let session = AVCaptureSession()
     let soundtrack = StreamingSoundtrack()
     private let movie = AVCaptureMovieFileOutput()
     private let sessionQueue = DispatchQueue(label: "camera.session")
-    private let library = URL.documentsDirectory.appending(path: "Takes", directoryHint: .isDirectory)
-    private var routeKey = ""
+    private var wantsCamera = false
     private var configuring = false
-    private enum Source { case stream(URLRequest, String), file(URL, String) }
+    private enum Source { case stream(URLRequest, String), file(URL, String), library(URL, String) }
     private var current: Source?
-    private var next: [(URLRequest, String)] = []
+    private var currentKey = ""
+    private var next: [(Source, String)] = []
     private var takeURL: URL?
     private var videoStart: Double?
-    private var takeCorrection: Double = 0
+    private var restoreTempo = false
     private var pendingStop = false
 
-    override init() {
-        super.init()
-        refreshRoute()
-        takes = ((try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)) ?? [])
-            .filter { ["mp4", "mov"].contains($0.pathExtension) }.sorted { $0.lastPathComponent > $1.lastPathComponent }
-    }
-
     func configure() async {
+        wantsCamera = true
         guard !ready, !configuring else { return }
         configuring = true
         defer { configuring = false }
@@ -43,9 +38,10 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
             message = "Allow camera access in Settings to record a take."
             return
         }
+        guard wantsCamera else { return }
         let capture = session, output = movie
         do {
-            quality = try await withCheckedThrowingContinuation { (done: CheckedContinuation<String, Error>) in
+            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
                 sessionQueue.async {
                     do {
                         if capture.inputs.isEmpty {
@@ -73,18 +69,21 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
                         }
                         capture.startRunning()
                         guard capture.isRunning else { throw TakeError("The camera could not start.") }
-                        switch capture.sessionPreset {
-                        case .hd4K3840x2160: done.resume(returning: "4K")
-                        case .hd1920x1080: done.resume(returning: "1080p")
-                        case .hd1280x720: done.resume(returning: "720p")
-                        default: done.resume(returning: "Camera")
-                        }
+                        done.resume()
                     } catch { done.resume(throwing: error) }
                 }
             }
-            ready = true
-            message = "Camera ready."
+            ready = wantsCamera
+            if ready { message = "" } else { releaseCamera() }
         } catch { message = error.localizedDescription }
+    }
+
+    func releaseCamera() {
+        wantsCamera = false
+        guard phase == .idle else { return }
+        ready = false
+        let capture = session
+        sessionQueue.async { if capture.isRunning { capture.stopRunning() } }
     }
 
     func selectFile(_ url: URL) throws {
@@ -92,22 +91,33 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let local = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension(url.pathExtension)
         try FileManager.default.copyItem(at: url, to: local)
-        start(.file(local, url.lastPathComponent))
+        start(.file(local, url.lastPathComponent), key: "file:" + url.absoluteString)
     }
 
-    func selectStream(_ request: URLRequest, title: String, enqueue: Bool) {
+    func selectLibrary(_ item: MPMediaItem) throws {
+        guard !item.hasProtectedAsset, let url = item.assetURL else {
+            throw TakeError("This song has no recordable audio available. Choose a downloaded, unprotected Music track.")
+        }
+        start(.library(url, item.title ?? "Music track"), key: "music:" + String(item.persistentID))
+    }
+
+    func selectStream(_ request: URLRequest, title: String, key: String, enqueue: Bool) {
         if enqueue, current != nil, [.playing, .buffering, .paused].contains(soundtrack.state) {
-            next.append((request, title))
+            next.append((.stream(request, title), key))
             upcoming.append(title)
-        } else { start(.stream(request, title)) }
+        } else { start(.stream(request, title), key: key) }
     }
 
-    private func start(_ source: Source) {
+    private func start(_ source: Source, key: String) {
         let previous = current
         current = source
+        currentKey = "song.rate." + SHA256.hash(data: Data(key.utf8)).map { String(format: "%02x", $0) }.joined()
+        speed = (UserDefaults.standard.object(forKey: currentKey) as? Double) ?? 1
+        soundtrack.setRate(speed)
         switch source {
         case let .stream(request, title): soundtrack.play(request, title: title)
         case let .file(url, title): soundtrack.play(url, title: title)
+        case let .library(url, title): soundtrack.playLibrary(url, title: title)
         }
         if case let .file(old, _)? = previous, case let .file(new, _) = source, old == new { return }
         if case let .file(old, _)? = previous { try? FileManager.default.removeItem(at: old) }
@@ -115,29 +125,33 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
 
     func playNext() {
         guard !next.isEmpty else { return }
-        let (request, title) = next.removeFirst()
+        let (song, key) = next.removeFirst()
         upcoming.removeFirst()
-        start(.stream(request, title))
+        start(song, key: key)
     }
 
     func togglePlayback() {
         switch soundtrack.state {
         case .playing, .buffering: soundtrack.pause()
         case .paused: soundtrack.resume()
-        default: if let current { start(current) }
+        default:
+            guard let current else { return }
+            switch current {
+            case let .file(url, title): soundtrack.play(url, title: title)
+            case let .stream(request, title): soundtrack.play(request, title: title)
+            case let .library(url, title): soundtrack.playLibrary(url, title: title)
+            }
+            soundtrack.setRate(speed)
         }
     }
 
-    func refreshRoute() {
-        let output = AVAudioSession.sharedInstance().currentRoute.outputs.first
-        routeKey = "sync.ms." + (output?.uid ?? "default")
-        outputName = output?.portName ?? "Current output"
-        correctionMS = UserDefaults.standard.double(forKey: routeKey)
-    }
-
-    func adjustSync(_ ms: Double) {
-        correctionMS = ms
-        UserDefaults.standard.set(ms, forKey: routeKey)
+    func changeSpeed(_ value: Double) {
+        guard !currentKey.isEmpty else { return }
+        let tuned = min(2, max(0.5, (value * 100).rounded() / 100))
+        guard tuned != speed else { return }
+        speed = tuned
+        soundtrack.setRate(tuned)
+        UserDefaults.standard.set(tuned, forKey: currentKey)
     }
 
     func interrupt() {
@@ -153,7 +167,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
             let raw = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension("mov")
             takeURL = raw
             videoStart = nil
-            takeCorrection = correctionMS / 1000
+            restoreTempo = originalTempo
             pendingStop = false
             phase = .starting
             message = "Starting camera."
@@ -191,46 +205,39 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     private func finish(_ raw: URL, error: NSError?) async {
         guard raw == takeURL else { return }
         phase = .saving
-        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-        let base = library.appending(path: "Take-\(stamp)-\(UUID().uuidString.prefix(6))")
         var audio: SoundtrackTake?
-        var validVideo = false
         defer {
             if let audio { try? FileManager.default.removeItem(at: audio.url) }
             takeURL = nil
             phase = .idle
+            if !wantsCamera { releaseCamera() }
+        }
+        if let error, (error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) != true {
+            soundtrack.discardTake()
+            try? FileManager.default.removeItem(at: raw)
+            message = error.localizedDescription
+            return
         }
         do {
-            if let error, (error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) != true {
-                soundtrack.discardTake()
-                throw error
-            }
-            validVideo = true
-            try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
-            audio = try await soundtrack.finishTake()
-            var offset: Double = 0
-            if let audio {
-                guard let videoStart else { throw TakeError("Camera timestamps were unavailable.") }
-                offset = audio.firstAudioHostTime - videoStart + takeCorrection
-            }
-            let saved = base.appendingPathExtension("mp4")
-            let size = try await TakeExport.save(video: raw, audio: audio?.url, audioOffset: offset, to: saved)
-            takes.insert(saved, at: 0)
-            try? FileManager.default.removeItem(at: raw)
-            message = "Saved \(Int(size.width)) × \(Int(size.height))."
-        } catch {
-            if validVideo {
-                soundtrack.discardTake()
-                let backup = base.appendingPathExtension("mov")
-                do {
-                    try FileManager.default.moveItem(at: raw, to: backup)
-                    takes.insert(backup, at: 0)
-                    message = "Saved camera video only. \(error.localizedDescription)"
-                } catch { message = "Could not save the take. \(error.localizedDescription)" }
-            } else {
+            let saved = try photos.destination()
+            do {
+                audio = try await soundtrack.finishTake()
+                var offset: Double = 0
+                if let audio {
+                    guard let videoStart else { throw TakeError("Camera timestamps were unavailable.") }
+                    offset = audio.firstAudioHostTime - videoStart
+                }
+                _ = try await TakeExport.save(video: raw, audio: audio?.url, audioOffset: offset,
+                                              speeds: restoreTempo ? audio?.speedChanges ?? [] : [],
+                                              videoStart: videoStart ?? 0, to: saved)
                 try? FileManager.default.removeItem(at: raw)
-                message = error.localizedDescription
+                message = ""
+            } catch {
+                soundtrack.discardTake()
+                try FileManager.default.moveItem(at: raw, to: saved.deletingPathExtension().appendingPathExtension("mov"))
+                message = "Camera video only. \(error.localizedDescription)"
             }
-        }
+            await photos.save()
+        } catch { message = "Could not finish saving the camera video. \(error.localizedDescription)" }
     }
 }

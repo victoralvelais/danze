@@ -13,10 +13,23 @@ struct LibrarySong: Decodable, Identifiable {
     }
 }
 
+struct LibraryCollection: Decodable, Identifiable, Hashable {
+    let id: String
+    let name: String
+    let artist: String?
+}
+
 private struct SubsonicReply: Decodable {
     struct Body: Decodable {
         struct Failure: Decodable { let code: Int }
         struct Songs: Decodable { let song: [LibrarySong]? }
+        struct Albums: Decodable { let album: [LibraryCollection]? }
+        struct Playlists: Decodable { let playlist: [LibraryCollection]? }
+        struct Playlist: Decodable { let entry: [LibrarySong]? }
+        let albumList2: Albums?
+        let album: Songs?
+        let playlists: Playlists?
+        let playlist: Playlist?
         let status: String
         let error: Failure?
         let searchResult3: Songs?
@@ -137,6 +150,23 @@ struct Navidrome {
         try check(response)
         let body = try SubsonicReply.checked(data)
         return (query.isEmpty ? body.randomSongs?.song : body.searchResult3?.song) ?? []
+    }
+
+    func collections(albums: Bool, offset: Int = 0) async throws -> [LibraryCollection] {
+        let req = albums ? request("getAlbumList2", [.init(name: "type", value: "alphabeticalByName"),
+                                                     .init(name: "size", value: "100"), .init(name: "offset", value: String(offset))])
+                         : request("getPlaylists")
+        let (data, response) = try await Self.session.data(for: req)
+        try check(response)
+        let body = try SubsonicReply.checked(data)
+        return (albums ? body.albumList2?.album : body.playlists?.playlist) ?? []
+    }
+
+    func tracks(in collection: LibraryCollection, album: Bool) async throws -> [LibrarySong] {
+        let (data, response) = try await Self.session.data(for: request(album ? "getAlbum" : "getPlaylist", [.init(name: "id", value: collection.id)]))
+        try check(response)
+        let body = try SubsonicReply.checked(data)
+        return (album ? body.album?.song : body.playlist?.entry) ?? []
     }
 
     func streamRequest(for song: LibrarySong) -> URLRequest {

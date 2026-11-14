@@ -67,7 +67,63 @@ struct TakeExportCheck {
                     (436...444).contains(crossings), "The chunked two-second MP3 did not decode progressively (\(frames) frames, \(crossings) crossings).")
     }
 
+    static func checkMixerTiming() throws {
+        var clock = MixerTimeline()
+        // 44.1 kHz, including a roughly 10 ms late callback every 300 ms.
+        let rate = 44100.0, block = 441
+        for i in 0..<400 {
+            let frame = Int64((i + (i >= 200 ? 1 : 0)) * block)
+            let jitter = i > 0 && i.isMultiple(of: 30) ? 0.011 : 0.0
+            let place = clock.position(sample: frame, host: 10 + Double(frame) / rate + jitter, count: block, rate: rate)
+            try require(Int64(((place - 10) * rate).rounded()) == frame, "Mixer callback jitter altered the sample timeline.")
+        }
+    }
+
+    static func checkVariableSpeed(_ mov: URL, _ caf: URL, _ root: URL) async throws {
+        let output = root.appendingPathComponent("speed.mp4")
+        let events = [SpeedChange(host: 9, rate: 0.5), SpeedChange(host: 11, rate: 2)]
+        _ = try await TakeExport.save(video: mov, audio: caf, audioOffset: 0, speeds: events, videoStart: 10, to: output)
+        let asset = AVURLAsset(url: output)
+        let image = try await asset.loadTracks(withMediaType: .video).first!
+        let sound = try await asset.loadTracks(withMediaType: .audio).first!
+        let v = try await image.load(.timeRange), a = try await sound.load(.timeRange)
+        try require(abs(v.duration.seconds - 2.5) < 0.05 && abs(a.duration.seconds - 2.5) < 0.05,
+                    "Variable speed durations differ. Video \(v.duration.seconds), audio \(a.duration.seconds).")
+        let original = AVURLAsset(url: mov)
+        let source = try await original.loadTracks(withMediaType: .video).first!
+        try require(try packets(original, source) == packets(asset, image), "Retiming changed compressed video frames.")
+        let reader = try AVAssetReader(asset: asset)
+        let out = AVAssetReaderTrackOutput(track: sound, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32, AVLinearPCMIsFloatKey: true
+        ])
+        reader.add(out)
+        try require(reader.startReading(), "Could not read speed test audio.")
+        var crossings = [0, 0], prior = [Float](repeating: 0, count: 2)
+        while let sample = out.copyNextSampleBuffer() {
+            guard let block = CMSampleBufferGetDataBuffer(sample), CMBlockBufferGetDataLength(block) > 0,
+                  let desc = CMSampleBufferGetFormatDescription(sample),
+                  let fmt = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee else { continue }
+            var data = [Float](repeating: 0, count: CMBlockBufferGetDataLength(block) / 4)
+            let ok = data.withUnsafeMutableBytes { ptr in
+                CMBlockBufferCopyDataBytes(block, atOffset: 0, dataLength: ptr.count, destination: ptr.baseAddress!)
+            }
+            try require(ok == 0, "Could not read samples.")
+            let t = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            let channels = Int(fmt.mChannelsPerFrame)
+            for i in stride(from: 0, to: data.count, by: channels) {
+                let time = t + Double(i / channels) / fmt.mSampleRate
+                let window = time >= 0.15 && time < 0.35 ? 0 : time >= 1 && time < 1.2 ? 1 : -1
+                if window < 0 { continue }
+                if prior[window] <= 0 && data[i] > 0 { crossings[window] += 1 }
+                prior[window] = data[i]
+            }
+        }
+        try require(abs(crossings[0] - 60) <= 6 && abs(crossings[1] - 180) <= 8,
+                    "Rate transitions or audio pitch changed unexpectedly: \(crossings).")
+    }
+
     static func main() async throws {
+        try checkMixerTiming()
         try checkStream()
         let root = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -75,6 +131,7 @@ struct TakeExportCheck {
         let mov = root.appendingPathComponent("camera.mov"), caf = root.appendingPathComponent("sound.caf")
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "Checks/camera.mov"), to: mov)
         try audio(caf)
+        try await checkVariableSpeed(mov, caf, root)
         let original = AVURLAsset(url: mov), cam = try await original.loadTracks(withMediaType: .video).first!
         let frameData = try packets(original, cam)
         let duration = try await cam.load(.timeRange).duration.seconds

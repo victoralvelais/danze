@@ -1,21 +1,22 @@
 # Dance Camera
 
-Play music from Navidrome while the rear camera is ready. Press **Record take** at any point to save a portrait clip with the music you heard during that take. You can also record a silent clip before you choose a song. The app records the digital soundtrack and leaves the microphone off.
+Start in **Music**. Connect to Navidrome to search songs and browse albums and playlists. Tap a title to play or use the queue button to add it to Up next. The library also offers the iPhone’s Music picker and audio from Files. Navidrome credentials stay in memory for the session.
 
-## Record a clip
+**Speed** changes playback immediately from 0.50× to 2.00× in 0.01× steps while preserving pitch. Tap the number to reset. Each song remembers its speed. The camera opens when you tap **Dance camera**, and playback continues across takes.
 
-1. Allow camera access. **Navidrome** opens your music library. Enter your server URL including any base path, then connect with your account or API key. Use HTTPS for a remote server. The app also supports a local HTTP hostname or private address. Sign-in details stay in memory for the session. [Navidrome API compatibility](https://www.navidrome.org/docs/developers/subsonic-api/)
-2. Tap a song to stream it, or use the queue button beside a song to add it to playback. Audio buffers as it plays. **Files** can open a local audio file. Play, pause, or skip from the camera screen.
-3. Tap **Record take**, then **Stop and save**. Playback can continue across takes. You can pause, resume, or change the song during a take. The app aligns the music you heard with the first camera frame and accounts for the output route’s reported latency.
-4. The camera chooses 4K when supported, then 1080p or the next available preset. Saving encodes the soundtrack to AAC and copies the compressed video into the MP4. The save message shows the capture dimensions. [Apple capture presets](https://developer.apple.com/documentation/avfoundation/avcapturesession/preset/hd4k3840x2160) · [Apple passthrough export](https://developer.apple.com/documentation/avfoundation/avassetexportpresetpassthrough)
-5. Open **Clips** to play the original, share it, or save a copy to Photos. In LiveContainer, **Share → Save to Files** also exports a copy.
+## Recording
 
-## Check timing on your iPhone
+- Leave **Finish at original song tempo** off to save the movement and music exactly as performed. The soundtrack comes from the live mixer, including pauses and speed changes. The microphone stays off.
+- Turn that option on before recording to dance to a slowed or sped-up track and save it at the original musical tempo. The app tracks speed changes while recording, then retimes both the music and the camera frames when it saves. For example, ten seconds of dancing at 0.80× becomes eight seconds in Photos. Silent stretches normally keep their real-time duration.
+- Stop the take and allow Photos additions when iOS asks. Photos receives the completed video automatically. If access or storage prevents delivery, the app holds the video for **Retry saving to Photos**. Previous builds’ clips can be moved with the one-time migration button. Existing copies you previously saved to Photos may appear twice if you migrate them.
+- Keep AirPods connected throughout a take. Output latency correction is automatic. The camera chooses the highest supported capture preset up to 4K. Export preserves compressed camera frames and orientation.
 
-Connect your AirPods, play a song with a sharp beat and record a visible tap on that beat after playback has started. Check the original in **Clips**. If the sound comes before the movement, open **Audio sync** and increase the shift. If it comes after the movement, decrease it. Adjust in small steps and record again. The app remembers the setting for each output. Switching headphones during a take ends the take.
+## Music sources
 
-For a streaming check, start a longer song and make two short clips at different points. Pause and resume during one take, and test another without choosing music. A network stall can leave silence while the video continues. Check the dimensions in the save message and compare quality using the original in Files or Photos.
+For the iPhone Music library, select a downloaded track with an unprotected audio asset, such as an eligible synced file or purchase. The picker can report media access as unavailable under a host without Music permission. Apple Music subscription recordings are protected. Navidrome and local audio support the complete playback and recording workflow. [Apple media item asset URLs](https://developer.apple.com/documentation/mediaplayer/mpmediaitem/asseturl) · [Protected media assets](https://developer.apple.com/documentation/mediaplayer/mpmediaitem/hasprotectedasset)
 
-## Build
+## Build and verification
 
-The `dance` project agent maintains this iPhone app. Each successful build on `main` publishes `DanceCamera.ipa` to a versioned GitHub Release. After a push from the configured Windows checkout, the project download helper saves that release to `release/v<version>-build.<number>/DanceCamera.ipa`. On iOS 18.2 or later, import the IPA using **+** in LiveContainer. [LiveContainer import guide](https://livecontainer.github.io/docs/installation/standalone#installing-apps)
+The dedicated project agent is `dance`. A push to `main` builds the unsigned iPhone IPA on GitHub Actions, runs synthetic audio and video checks, and publishes a versioned release. Pushes from the configured Windows checkout download the matching IPA to `release/v<version>-build.<number>/DanceCamera.ipa`. Import it into LiveContainer on iOS 18.2 or later.
+
+CI feeds an MP3 to the decoder in chunks, exercises mixer sample-clock continuity with jitter and a dropped block, and checks exported frame bytes, rotation, signed offsets, and variable-speed audio and video. On hardware, compare the same song from Files and Navidrome, change speed during a take, check a slow-network recovery on AirPods, and play the original saved by Photos.

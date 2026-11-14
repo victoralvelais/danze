@@ -1,7 +1,7 @@
 import SwiftUI
 import AVFoundation
 import UniformTypeIdentifiers
-import AVKit
+import MediaPlayer
 import Photos
 
 @main
@@ -31,57 +31,47 @@ private struct Preview: UIViewRepresentable {
 
 struct DanceCameraView: View {
     @StateObject private var camera = DanceRecorder()
+    @State private var cameraOpen = false
     @State private var choosing = false
-    @State private var libraryOpen = false
-    @State private var syncOpen = false
-    @State private var account = LibraryAccount()
-    @State private var savedClipsOpen = false
+    @State private var musicPicker = false
+    @State private var libraryMessage = ""
     @Environment(\.scenePhase) private var scene
 
     var body: some View {
         NavigationStack {
-            VStack(spacing: 10) {
-                ZStack(alignment: .topTrailing) {
-                    Color.black
-                    if camera.ready { Preview(session: camera.session) }
-                    if !camera.quality.isEmpty {
-                        Text(camera.quality).font(.caption.bold())
-                            .padding(8).background(.black.opacity(0.65), in: Capsule()).foregroundStyle(.white).padding(8)
-                    }
-                }.clipShape(RoundedRectangle(cornerRadius: 12))
-                Text(camera.message).font(.footnote)
-                Transport(camera: camera, music: camera.soundtrack)
-                HStack {
-                    Button("Navidrome") { libraryOpen = true }.buttonStyle(.bordered)
-                    Button("Files") { choosing = true }
-                    Spacer()
-                    if camera.phase == .starting || camera.phase == .recording {
-                        Button("Stop and save") { camera.stop() }.buttonStyle(.borderedProminent).tint(.red)
-                    } else {
-                        Button(camera.phase == .saving ? "Saving…" : "Record take") { camera.record() }
-                            .buttonStyle(.borderedProminent).disabled(!camera.ready || camera.phase != .idle)
-                    }
+            MusicLibrary(camera: camera, pickMusic: chooseMusic, pickFile: { choosing = true })
+                .navigationTitle("Music")
+                .safeAreaInset(edge: .bottom, spacing: 0) {
+                    VStack(spacing: 10) {
+                        PlayerControls(camera: camera, music: camera.soundtrack)
+                        if !libraryMessage.isEmpty { Text(libraryMessage).font(.caption) }
+                        PhotoStatus(photos: camera.photos)
+                        Button { cameraOpen = true } label: {
+                            Label("Dance camera", systemImage: "video.fill").frame(maxWidth: .infinity)
+                        }.buttonStyle(.borderedProminent)
+                    }.padding().background(.regularMaterial)
                 }
-            }
-            .padding()
-            .navigationTitle("Dance Camera").navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Audio sync") { camera.refreshRoute(); syncOpen = true }.disabled(camera.phase != .idle)
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button("Clips (\(camera.takes.count))") {
-                        if camera.soundtrack.state == .playing || camera.soundtrack.state == .buffering { camera.soundtrack.pause() }
-                        savedClipsOpen = true
-                    }.disabled(camera.takes.isEmpty || camera.phase != .idle)
-                }
+        }
+        .fullScreenCover(isPresented: $cameraOpen, onDismiss: { camera.releaseCamera() }) {
+            CameraStudio(camera: camera)
+        }
+        .sheet(isPresented: $musicPicker) {
+            SystemMusicPicker { item in
+                musicPicker = false
+                guard let item else { return }
+                do { try camera.selectLibrary(item); libraryMessage = "" }
+                catch { libraryMessage = error.localizedDescription }
             }
         }
-        .task { await camera.configure() }
-        .onChange(of: scene) { _, value in
-            if value == .background { camera.interrupt() }
-            if value == .active { camera.refreshRoute(); Task { await camera.configure() } }
+        .fileImporter(isPresented: $choosing, allowedContentTypes: [.audio]) { result in
+            do { try camera.selectFile(result.get()); libraryMessage = "" }
+            catch { if (error as NSError).code != NSUserCancelledError { libraryMessage = error.localizedDescription } }
         }
+        .onChange(of: scene) { _, phase in
+            if phase == .background, cameraOpen { camera.interrupt() }
+            if phase == .active, cameraOpen { Task { await camera.configure() } }
+        }
+        .onReceive(camera.soundtrack.$state.removeDuplicates()) { if $0 == .ended { camera.playNext() } }
         .onReceive(NotificationCenter.default.publisher(for: AVAudioSession.interruptionNotification)) { note in
             if (note.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt) == AVAudioSession.InterruptionType.began.rawValue {
                 camera.interrupt()
@@ -95,27 +85,79 @@ struct DanceCameraView: View {
                reason == .oldDeviceUnavailable || reason == .newDeviceAvailable || reason == .override {
                 camera.interrupt()
             }
-            camera.refreshRoute()
         }
-        .sheet(isPresented: $libraryOpen) {
-            MusicLibrary(account: $account) { camera.selectStream($0, title: $1, enqueue: $2) }
-        }
-        .sheet(isPresented: $syncOpen) { SyncSettings(camera: camera).presentationDetents([.medium]) }
-        .sheet(isPresented: $savedClipsOpen) { SavedClips(takes: camera.takes) }
-        .fileImporter(isPresented: $choosing, allowedContentTypes: [.audio]) { result in
-            do { try camera.selectFile(result.get()) }
-            catch { if (error as NSError).code != NSUserCancelledError { camera.message = error.localizedDescription } }
+    }
+
+    private func chooseMusic() {
+        MPMediaLibrary.requestAuthorization { status in
+            Task { @MainActor in
+                if status == .authorized { libraryMessage = ""; musicPicker = true }
+                else { libraryMessage = "Allow Media & Apple Music access in Settings to browse your library." }
+            }
         }
     }
 }
 
-private struct Transport: View {
+private struct SystemMusicPicker: UIViewControllerRepresentable {
+    let selected: (MPMediaItem?) -> Void
+    class Coordinator: NSObject, MPMediaPickerControllerDelegate {
+        let complete: (MPMediaItem?) -> Void
+        init(_ complete: @escaping (MPMediaItem?) -> Void) { self.complete = complete }
+        func mediaPicker(_ mediaPicker: MPMediaPickerController, didPickMediaItems collection: MPMediaItemCollection) {
+            complete(collection.items.first)
+        }
+        func mediaPickerDidCancel(_ mediaPicker: MPMediaPickerController) { complete(nil) }
+    }
+    func makeCoordinator() -> Coordinator { Coordinator(selected) }
+    func makeUIViewController(context: Context) -> MPMediaPickerController {
+        let picker = MPMediaPickerController(mediaTypes: .music)
+        picker.showsCloudItems = false
+        picker.allowsPickingMultipleItems = false
+        picker.delegate = context.coordinator
+        return picker
+    }
+    func updateUIViewController(_ uiViewController: MPMediaPickerController, context: Context) {}
+}
+
+private struct CameraStudio: View {
+    @ObservedObject var camera: DanceRecorder
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        VStack(spacing: 12) {
+            HStack {
+                Button { dismiss() } label: { Label("Music", systemImage: "chevron.left") }
+                    .disabled(camera.phase != .idle)
+                Spacer()
+                if camera.phase == .recording { Label("Recording", systemImage: "record.circle").foregroundStyle(.red) }
+            }
+            ZStack {
+                Color.black
+                if camera.ready { Preview(session: camera.session) }
+            }.clipShape(RoundedRectangle(cornerRadius: 14))
+            PlayerControls(camera: camera, music: camera.soundtrack)
+            Toggle("Finish at original song tempo", isOn: $camera.originalTempo)
+                .font(.subheadline).disabled(camera.phase != .idle)
+            if !camera.message.isEmpty { Text(camera.message).font(.caption) }
+            PhotoStatus(photos: camera.photos)
+            if camera.phase == .starting || camera.phase == .recording {
+                Button("Stop and save") { camera.stop() }.buttonStyle(.borderedProminent).tint(.red)
+            } else {
+                Button(camera.phase == .saving ? "Saving…" : "Record take") { camera.record() }
+                    .buttonStyle(.borderedProminent).disabled(!camera.ready || camera.phase != .idle)
+            }
+        }
+        .padding()
+        .interactiveDismissDisabled(camera.phase != .idle)
+        .task { await camera.configure() }
+    }
+}
+
+private struct PlayerControls: View {
     @ObservedObject var camera: DanceRecorder
     @ObservedObject var music: StreamingSoundtrack
-
     var body: some View {
         if !music.title.isEmpty {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(spacing: 5) {
                 HStack {
                     Button { camera.togglePlayback() } label: {
                         let active = music.state == .playing || music.state == .buffering
@@ -125,90 +167,37 @@ private struct Transport: View {
                     Text(music.title).font(.headline).lineLimit(2)
                     Spacer()
                     if !camera.upcoming.isEmpty {
-                        Button { camera.playNext() } label: {
-                            Image(systemName: "forward.end.fill").accessibilityLabel("Next song")
-                        }.buttonStyle(.bordered)
+                        Button { camera.playNext() } label: { Image(systemName: "forward.end.fill").accessibilityLabel("Next song") }
                     }
                 }
+                HStack {
+                    Text("Speed").font(.caption)
+                    Slider(value: Binding(get: { camera.speed }, set: { camera.changeSpeed($0) }),
+                           in: 0.5...2, step: 0.01).accessibilityLabel("Song speed")
+                    Button { camera.changeSpeed(1) } label: {
+                        Text(String(format: "%.2f×", camera.speed)).font(.subheadline.monospacedDigit())
+                    }.accessibilityHint("Reset song speed")
+                }
                 if music.state == .buffering { ProgressView("Buffering audio").font(.caption) }
-                if case .failed(let problem) = music.state { Text(problem).font(.footnote).foregroundStyle(.red) }
-                if let next = camera.upcoming.first { Text("Up next · \(next)").font(.caption).lineLimit(1) }
+                if case let .failed(problem) = music.state { Text(problem).font(.caption).foregroundStyle(.red) }
             }
-            .onChange(of: music.state) { _, value in if value == .ended { camera.playNext() } }
         }
     }
 }
 
-private struct SyncSettings: View {
-    @ObservedObject var camera: DanceRecorder
-    @Environment(\.dismiss) private var dismiss
+private struct PhotoStatus: View {
+    @ObservedObject var photos: PhotoDelivery
     var body: some View {
-        NavigationStack {
-            Form {
-                Section(camera.outputName) {
-                    Text("The app applies output latency automatically. Use this adjustment if the saved clip still looks off.")
-                    Text("Soundtrack shift: \(Int(camera.correctionMS)) ms").monospacedDigit()
-                    Slider(value: Binding(get: { camera.correctionMS }, set: { camera.adjustSync($0) }),
-                           in: -500...500, step: 10).accessibilityLabel("Soundtrack shift in milliseconds")
-                    Text("If the beat comes before the movement, move right. If it comes after, move left. Changes apply to your next take.")
-                        .font(.footnote)
-                    Button("Reset adjustment") { camera.adjustSync(0) }
-                }
+        VStack(spacing: 3) {
+            if !photos.notice.isEmpty { Text(photos.notice).font(.caption) }
+            if photos.pendingCount > 0 && !photos.delivering {
+                Button("Retry saving to Photos") { Task { await photos.save() } }
             }
-            .navigationTitle("Audio sync").navigationBarTitleDisplayMode(.inline)
-            .toolbar { Button("Done") { dismiss() } }
-        }
-    }
-}
-
-private struct SavedClips: View {
-    let takes: [URL]
-    @Environment(\.dismiss) private var dismiss
-    @State private var player: AVPlayer?
-    @State private var message = ""
-    @State private var saving = false
-
-    var body: some View {
-        NavigationStack {
-            List {
-                if let player { VideoPlayer(player: player).frame(height: 260) }
-                if !message.isEmpty { Text(message).font(.footnote) }
-                ForEach(takes, id: \.self) { url in
-                    VStack(alignment: .leading, spacing: 8) {
-                        Button(url.deletingPathExtension().lastPathComponent) {
-                            player?.pause()
-                            player = AVPlayer(url: url)
-                            player?.play()
-                        }.accessibilityHint("Play this clip")
-                        HStack {
-                            Button("Save to Photos") { saveToPhotos(url) }.disabled(saving)
-                            Spacer()
-                            ShareLink("Share", item: url)
-                        }.font(.subheadline)
-                    }.buttonStyle(.borderless)
-                }
+            if photos.previousCount > 0 {
+                Button("Move \(photos.previousCount) previous clips to Photos") {
+                    Task { await photos.save(includePrevious: true) }
+                }.disabled(photos.delivering)
             }
-            .navigationTitle("Saved clips")
-            .toolbar { Button("Done") { dismiss() } }
-        }.onDisappear { player?.pause() }
-    }
-
-    private func saveToPhotos(_ url: URL) {
-        guard !saving else { return }
-        saving = true
-        Task {
-            defer { saving = false }
-            let access = await PHPhotoLibrary.requestAuthorization(for: .addOnly)
-            guard access == .authorized || access == .limited else {
-                message = "Photos access is off. Your clip is in Saved clips. Use Share, then Save to Files."
-                return
-            }
-            do {
-                try await PHPhotoLibrary.shared().performChanges {
-                    PHAssetCreationRequest.forAsset().addResource(with: .video, fileURL: url, options: nil)
-                }
-                message = "Clip saved to Photos."
-            } catch { message = error.localizedDescription }
         }
     }
 }
