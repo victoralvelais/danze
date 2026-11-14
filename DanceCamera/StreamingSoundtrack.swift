@@ -433,7 +433,7 @@ private final class IncrementalDecoder {
         }
     }
 
-    private func convert(_ converter: AVAudioConverter, format: AVAudioFormat, input: AVAudioConverterInputBlock) throws {
+    private func convert(_ converter: AVAudioConverter, format: AVAudioFormat, input: @escaping AVAudioConverterInputBlock) throws {
         while true {
             guard let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096) else { throw TakeError("Could not allocate decoder output.") }
             var error: NSError?
