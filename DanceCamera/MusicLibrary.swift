@@ -14,7 +14,7 @@ struct LibraryAccount {
 struct MusicLibrary: View {
     @Environment(\.dismiss) private var dismiss
     @Binding var account: LibraryAccount
-    let select: (URL, String) throws -> Void
+    let select: (URLRequest, String, Bool) -> Void
     @State private var query = ""
     @State private var songs: [LibrarySong] = []
     @State private var message = ""
@@ -60,11 +60,17 @@ struct MusicLibrary: View {
                 if !songs.isEmpty {
                     Section("Songs") {
                         ForEach(songs) { song in
-                            Button { prepare(song) } label: {
-                                VStack(alignment: .leading) {
-                                    Text(song.title)
-                                    if let artist = song.artist { Text(artist).font(.caption).foregroundStyle(.secondary) }
-                                }
+                            HStack {
+                                Button { play(song, enqueue: false) } label: {
+                                    VStack(alignment: .leading) {
+                                        Text(song.title)
+                                        if let artist = song.artist { Text(artist).font(.caption).foregroundStyle(.secondary) }
+                                    }
+                                }.buttonStyle(.borderless)
+                                Spacer()
+                                Button { play(song, enqueue: true) } label: {
+                                    Image(systemName: "text.badge.plus").accessibilityLabel("Queue \(song.title)")
+                                }.buttonStyle(.borderless)
                             }
                         }
                     }.disabled(busy)
@@ -96,19 +102,11 @@ struct MusicLibrary: View {
         }
     }
 
-    private func prepare(_ song: LibrarySong) {
-        guard !busy else { return }
-        busy = true
-        message = "Preparing \(song.title)…"
-        work = Task {
-            defer { busy = false }
-            do {
-                let file = try await account.client().prepare(song)
-                defer { try? FileManager.default.removeItem(at: file) }
-                try Task.checkCancellation()
-                try select(file, song.displayName)
-                dismiss()
-            } catch { if !Task.isCancelled { message = error.localizedDescription } }
-        }
+    private func play(_ song: LibrarySong, enqueue: Bool) {
+        do {
+            let client = try account.client()
+            select(client.streamRequest(for: song), song.displayName, enqueue)
+            if enqueue { message = "Added \(song.title) to playback." } else { dismiss() }
+        } catch { message = error.localizedDescription }
     }
 }

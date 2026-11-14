@@ -31,6 +31,13 @@ jobs:
             CONFIGURATION_BUILD_DIR="$RUNNER_TEMP/products" \
             OBJROOT="$RUNNER_TEMP/intermediates" build
 
+      - name: Verify clip timing and video passthrough
+        shell: bash
+        run: |
+          set -euo pipefail
+          xcrun swiftc -target "$(uname -m)-apple-macos15.0" DanceCamera/TakeExport.swift Checks/TakeExportCheck.swift -o "$RUNNER_TEMP/check-takes"
+          "$RUNNER_TEMP/check-takes"
+
       - name: Package and verify IPA
         shell: bash
         run: |

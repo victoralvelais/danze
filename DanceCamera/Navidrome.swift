@@ -1,13 +1,11 @@
 import Foundation
 import CryptoKit
-import UniformTypeIdentifiers
 import Network
 
 struct LibrarySong: Decodable, Identifiable {
     let id: String
     let title: String
     let artist: String?
-    let suffix: String?
 
     var displayName: String {
         guard let artist, !artist.isEmpty else { return title }
@@ -141,24 +139,7 @@ struct Navidrome {
         return (query.isEmpty ? body.randomSongs?.song : body.searchResult3?.song) ?? []
     }
 
-    func prepare(_ song: LibrarySong) async throws -> URL {
-        let req = request("stream", [.init(name: "id", value: song.id), .init(name: "format", value: "mp3")])
-        let (download, response) = try await Self.session.download(for: req)
-        defer { try? FileManager.default.removeItem(at: download) }
-        try Task.checkCancellation()
-        try check(response)
-        let mime = response.mimeType?.lowercased() ?? ""
-        if mime.contains("json") {
-            let data = try Data(contentsOf: download, options: .mappedIfSafe)
-            _ = try SubsonicReply.checked(data)
-            throw TakeError("Navidrome returned metadata instead of audio.")
-        }
-        if mime.contains("xml") || mime.hasPrefix("text/") { throw TakeError("Navidrome returned a page instead of audio. Check access to this track.") }
-        let knownExtensions = ["mp3", "m4a", "aac", "mp4", "wav", "aif", "aiff", "flac", "caf", "ogg", "opus"]
-        let type = UTType(mimeType: mime)
-        let ext = [type?.preferredFilenameExtension, song.suffix, "mp3"].compactMap { $0?.lowercased() }.first(where: { knownExtensions.contains($0) }) ?? "mp3"
-        let destination = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension(ext)
-        try FileManager.default.moveItem(at: download, to: destination)
-        return destination
+    func streamRequest(for song: LibrarySong) -> URLRequest {
+        request("stream", [.init(name: "id", value: song.id), .init(name: "format", value: "mp3")])
     }
 }

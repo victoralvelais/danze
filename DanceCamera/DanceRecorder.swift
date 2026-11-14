@@ -9,142 +9,182 @@ struct TakeError: LocalizedError {
 enum TakePhase { case idle, starting, recording, saving }
 
 @MainActor
-final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate, AVAudioPlayerDelegate {
-    @Published var message = "Choose a soundtrack and frame the dancer."
+final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
+    @Published var message = "Starting camera."
     @Published private(set) var phase = TakePhase.idle
     @Published private(set) var ready = false
-    @Published private(set) var songName: String?
+    @Published private(set) var quality = ""
     @Published private(set) var takes: [URL] = []
+    @Published private(set) var upcoming: [String] = []
+    @Published private(set) var outputName = ""
+    @Published private(set) var correctionMS: Double = 0
     let session = AVCaptureSession()
+    let soundtrack = StreamingSoundtrack()
     private let movie = AVCaptureMovieFileOutput()
-    private let queue = DispatchQueue(label: "camera.session")
-    private var music: URL?
-    private var player: AVAudioPlayer?
-    private var takeURL: URL?
-    private var songOffset: Double?
-    private var pendingStop = false
+    private let sessionQueue = DispatchQueue(label: "camera.session")
     private let library = URL.documentsDirectory.appending(path: "Takes", directoryHint: .isDirectory)
+    private var routeKey = ""
+    private var configuring = false
+    private enum Source { case stream(URLRequest, String), file(URL, String) }
+    private var current: Source?
+    private var next: [(URLRequest, String)] = []
+    private var takeURL: URL?
+    private var videoStart: Double?
+    private var takeCorrection: Double = 0
+    private var pendingStop = false
 
     override init() {
         super.init()
+        refreshRoute()
         takes = ((try? FileManager.default.contentsOfDirectory(at: library, includingPropertiesForKeys: nil)) ?? [])
-            .filter { $0.pathExtension == "mp4" }.sorted { $0.lastPathComponent > $1.lastPathComponent }
+            .filter { ["mp4", "mov"].contains($0.pathExtension) }.sorted { $0.lastPathComponent > $1.lastPathComponent }
     }
 
     func configure() async {
-        guard !ready else { return }
+        guard !ready, !configuring else { return }
+        configuring = true
+        defer { configuring = false }
         guard await AVCaptureDevice.requestAccess(for: .video) else {
             message = "Allow camera access in Settings to record a take."
             return
         }
         let capture = session, output = movie
         do {
-            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-                queue.async {
+            quality = try await withCheckedThrowingContinuation { (done: CheckedContinuation<String, Error>) in
+                sessionQueue.async {
                     do {
                         if capture.inputs.isEmpty {
                             guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
                             else { throw TakeError("No rear camera available.") }
                             let input = try AVCaptureDeviceInput(device: camera)
                             capture.beginConfiguration()
+                            defer { capture.commitConfiguration() }
                             capture.automaticallyConfiguresApplicationAudioSession = false
-                            if capture.canSetSessionPreset(.high) { capture.sessionPreset = .high }
-                            guard capture.canAddInput(input) else {
-                                capture.commitConfiguration()
-                                throw TakeError("Camera input is unavailable.")
-                            }
+                            guard capture.canAddInput(input) else { throw TakeError("Camera input is unavailable.") }
                             capture.addInput(input)
                             guard capture.canAddOutput(output) else {
                                 capture.removeInput(input)
-                                capture.commitConfiguration()
                                 throw TakeError("Video output is unavailable.")
                             }
                             capture.addOutput(output)
-                            if let connection = output.connection(with: .video), connection.isVideoRotationAngleSupported(90) {
-                                connection.videoRotationAngle = 90
+                            let presets: [AVCaptureSession.Preset] = [.hd4K3840x2160, .hd1920x1080, .hd1280x720, .high]
+                            if let best = presets.first(where: { capture.canSetSessionPreset($0) }) { capture.sessionPreset = best }
+                            if let connection = output.connection(with: .video) {
+                                if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
+                                if output.availableVideoCodecTypes.contains(.hevc) {
+                                    output.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
+                                }
                             }
-                            capture.commitConfiguration()
                         }
                         capture.startRunning()
                         guard capture.isRunning else { throw TakeError("The camera could not start.") }
-                        done.resume()
+                        switch capture.sessionPreset {
+                        case .hd4K3840x2160: done.resume(returning: "4K")
+                        case .hd1920x1080: done.resume(returning: "1080p")
+                        case .hd1280x720: done.resume(returning: "720p")
+                        default: done.resume(returning: "Camera")
+                        }
                     } catch { done.resume(throwing: error) }
                 }
             }
             ready = true
+            message = "Camera ready."
         } catch { message = error.localizedDescription }
     }
 
-    func select(_ url: URL, title: String? = nil) throws {
-        guard phase == .idle else { return }
+    func selectFile(_ url: URL) throws {
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let imported = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension(url.pathExtension)
-        try FileManager.default.copyItem(at: url, to: imported)
-        do {
-            let candidate = try AVAudioPlayer(contentsOf: imported)
-            guard candidate.duration > 0 else { throw TakeError("Choose a playable audio file.") }
-        } catch {
-            try? FileManager.default.removeItem(at: imported)
-            throw error
+        let local = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension(url.pathExtension)
+        try FileManager.default.copyItem(at: url, to: local)
+        start(.file(local, url.lastPathComponent))
+    }
+
+    func selectStream(_ request: URLRequest, title: String, enqueue: Bool) {
+        if enqueue, current != nil, [.playing, .buffering, .paused].contains(soundtrack.state) {
+            next.append((request, title))
+            upcoming.append(title)
+        } else { start(.stream(request, title)) }
+    }
+
+    private func start(_ source: Source) {
+        let previous = current
+        current = source
+        switch source {
+        case let .stream(request, title): soundtrack.play(request, title: title)
+        case let .file(url, title): soundtrack.play(url, title: title)
         }
-        if let old = music { try? FileManager.default.removeItem(at: old) }
-        music = imported
-        songName = title ?? url.lastPathComponent
-        message = "Ready to record."
+        if case let .file(old, _)? = previous, case let .file(new, _) = source, old == new { return }
+        if case let .file(old, _)? = previous { try? FileManager.default.removeItem(at: old) }
+    }
+
+    func playNext() {
+        guard !next.isEmpty else { return }
+        let (request, title) = next.removeFirst()
+        upcoming.removeFirst()
+        start(.stream(request, title))
+    }
+
+    func togglePlayback() {
+        switch soundtrack.state {
+        case .playing, .buffering: soundtrack.pause()
+        case .paused: soundtrack.resume()
+        default: if let current { start(current) }
+        }
+    }
+
+    func refreshRoute() {
+        let output = AVAudioSession.sharedInstance().currentRoute.outputs.first
+        routeKey = "sync.ms." + (output?.uid ?? "default")
+        outputName = output?.portName ?? "Current output"
+        correctionMS = UserDefaults.standard.double(forKey: routeKey)
+    }
+
+    func adjustSync(_ ms: Double) {
+        correctionMS = ms
+        UserDefaults.standard.set(ms, forKey: routeKey)
+    }
+
+    func interrupt() {
+        stop()
+        if soundtrack.state == .playing || soundtrack.state == .buffering { soundtrack.pause() }
     }
 
     func record() {
-        guard phase == .idle, ready, let music else { return }
+        guard phase == .idle, ready else { return }
         guard session.isRunning else { message = "Camera unavailable. Return to the app and try again."; return }
         do {
-            let audio = AVAudioSession.sharedInstance()
-            try audio.setCategory(.playback)
-            try audio.setActive(true)
-            let track = try AVAudioPlayer(contentsOf: music)
-            guard track.prepareToPlay() else { throw TakeError("Could not prepare the soundtrack.") }
+            try soundtrack.beginTake()
             let raw = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension("mov")
             takeURL = raw
-            songOffset = nil
+            videoStart = nil
+            takeCorrection = correctionMS / 1000
             pendingStop = false
-            player = track
-            track.delegate = self
             phase = .starting
-            message = "Starting camera…"
+            message = "Starting camera."
             movie.startRecording(to: raw, recordingDelegate: self)
-        } catch {
-            try? AVAudioSession.sharedInstance().setActive(false)
-            message = error.localizedDescription
-        }
+        } catch { message = error.localizedDescription }
     }
 
     func stop() {
         if phase == .starting { pendingStop = true; return }
         guard phase == .recording else { return }
         phase = .saving
-        message = "Saving take…"
-        player?.stop()
+        message = "Saving take."
         movie.stopRecording()
-    }
-
-    nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
-        Task { @MainActor in
-            if self.player === player { self.stop() }
-        }
     }
 
     nonisolated func fileOutput(_ output: AVCaptureFileOutput, didStartRecordingTo fileURL: URL,
                                 startPTS: CMTime, from connections: [AVCaptureConnection]) {
         Task { @MainActor in
-            guard self.takeURL == fileURL, self.phase == .starting, let player = self.player else { return }
+            guard self.takeURL == fileURL, self.phase == .starting else { return }
+            if let clock = self.session.synchronizationClock {
+                let host = CMSyncConvertTime(startPTS, from: clock, to: CMClockGetHostTimeClock()).seconds
+                if host.isFinite { self.videoStart = host }
+            }
             self.phase = .recording
-            guard !self.pendingStop, let clock = self.session.synchronizationClock else { self.stop(); return }
-            let firstFrame = CMSyncConvertTime(startPTS, from: clock, to: CMClockGetHostTimeClock()).seconds
-            let lead = 0.35
-            let hostNow = CMClockGetTime(CMClockGetHostTimeClock()).seconds
-            guard firstFrame.isFinite, player.play(atTime: player.deviceCurrentTime + lead) else { self.stop(); return }
-            self.songOffset = max(0, hostNow + lead - firstFrame)
-            self.message = "Recording with \(self.songName ?? "music")."
+            self.message = "Recording."
+            if self.pendingStop { self.stop() }
         }
     }
 
@@ -156,46 +196,46 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     private func finish(_ raw: URL, error: NSError?) async {
         guard raw == takeURL else { return }
         phase = .saving
-        player?.stop()
-        player = nil
-        try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+        let base = library.appending(path: "Take-\(stamp)-\(UUID().uuidString.prefix(6))")
+        var audio: SoundtrackTake?
+        var validVideo = false
         defer {
-            try? FileManager.default.removeItem(at: raw)
+            if let audio { try? FileManager.default.removeItem(at: audio.url) }
             takeURL = nil
             phase = .idle
         }
         do {
-            if let error, (error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) != true { throw error }
-            guard let music, let songOffset else { throw TakeError("Recording ended before the soundtrack started.") }
+            if let error, (error.userInfo[AVErrorRecordingSuccessfullyFinishedKey] as? Bool) != true {
+                soundtrack.discardTake()
+                throw error
+            }
+            validVideo = true
             try FileManager.default.createDirectory(at: library, withIntermediateDirectories: true)
-            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let saved = library.appending(path: "Take-\(stamp)-\(UUID().uuidString.prefix(6)).mp4")
-            try await Self.mix(video: raw, music: music, offset: songOffset, destination: saved)
+            audio = try await soundtrack.finishTake()
+            var offset: Double = 0
+            if let audio {
+                guard let videoStart else { throw TakeError("Camera timestamps were unavailable.") }
+                offset = audio.firstAudioHostTime - videoStart + takeCorrection
+            }
+            let saved = base.appendingPathExtension("mp4")
+            let size = try await TakeExport.save(video: raw, audio: audio?.url, audioOffset: offset, to: saved)
             takes.insert(saved, at: 0)
-            message = "Take saved on this iPhone."
-        } catch { message = error.localizedDescription }
-    }
-
-    private nonisolated static func mix(video: URL, music: URL, offset: Double, destination: URL) async throws {
-        let videoAsset = AVURLAsset(url: video), musicAsset = AVURLAsset(url: music)
-        let timeline = AVMutableComposition()
-        guard let image = try await videoAsset.loadTracks(withMediaType: .video).first,
-              let song = try await musicAsset.loadTracks(withMediaType: .audio).first,
-              let picture = timeline.addMutableTrack(withMediaType: .video, preferredTrackID: kCMPersistentTrackID_Invalid),
-              let sound = timeline.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
-        else { throw TakeError("A camera or soundtrack track is missing.") }
-        let v = try await image.load(.timeRange), a = try await song.load(.timeRange)
-        let delay = CMTime(seconds: offset, preferredTimescale: 48000)
-        let common = CMTimeMinimum(v.duration - delay, a.duration)
-        guard common.isNumeric, common > .zero else { throw TakeError("Record a longer take so it includes music.") }
-        try picture.insertTimeRange(CMTimeRange(start: v.start + delay, duration: common), of: image, at: .zero)
-        picture.preferredTransform = try await image.load(.preferredTransform)
-        try sound.insertTimeRange(CMTimeRange(start: a.start, duration: common), of: song, at: .zero)
-        guard let exporter = AVAssetExportSession(asset: timeline, presetName: AVAssetExportPresetHighestQuality),
-              exporter.supportedFileTypes.contains(.mp4) else { throw TakeError("MP4 export is unavailable.") }
-        let temp = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension("mp4")
-        defer { try? FileManager.default.removeItem(at: temp) }
-        try await exporter.export(to: temp, as: .mp4)
-        try FileManager.default.moveItem(at: temp, to: destination)
+            try? FileManager.default.removeItem(at: raw)
+            message = "Saved \(Int(size.width)) × \(Int(size.height))."
+        } catch {
+            if validVideo {
+                soundtrack.discardTake()
+                let backup = base.appendingPathExtension("mov")
+                do {
+                    try FileManager.default.moveItem(at: raw, to: backup)
+                    takes.insert(backup, at: 0)
+                    message = "Saved camera video only. \(error.localizedDescription)"
+                } catch { message = "Could not save the take. \(error.localizedDescription)" }
+            } else {
+                try? FileManager.default.removeItem(at: raw)
+                message = error.localizedDescription
+            }
+        }
     }
 }
