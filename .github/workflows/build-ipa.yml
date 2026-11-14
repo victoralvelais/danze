@@ -42,7 +42,7 @@ jobs:
           bundle="$RUNNER_TEMP/products/$APP.app"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")"
           test -x "$bundle/$executable"
-          xcrun lipo -verify_arch arm64 "$bundle/$executable"
+          xcrun lipo "$bundle/$executable" -verify_arch arm64
           xcrun vtool -show-build "$bundle/$executable" | grep -Eq 'platform[[:space:]]+IOS[[:space:]]*$'
 
           mkdir -p "$RUNNER_TEMP/package/Payload"
