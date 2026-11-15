@@ -298,6 +298,8 @@ struct TakeExportCheck {
         defer { try? FileManager.default.removeItem(at: root) }
         let mov = root.appendingPathComponent("camera.mov"), caf = root.appendingPathComponent("sound.caf")
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "Checks/camera.mov"), to: mov)
+        try await SourceAudioCheck.checkPlayback(mov, root)
+        try await SourceAudioCheck.checkSource(mov, root)
         try await checkExportedTone(mov, root)
         try audio(caf)
         try await checkVariableSpeed(mov, caf, root)

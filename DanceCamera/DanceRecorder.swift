@@ -301,7 +301,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
                 }
                 _ = try await TakeExport.save(video: raw, audio: audio?.url, audioOffset: offset,
                                               speeds: restoreTempo ? audio?.speedChanges ?? [] : [],
-                                              videoStart: videoStart ?? 0, to: saved)
+                                              videoStart: videoStart ?? 0, source: audio?.source, to: saved)
                 try? FileManager.default.removeItem(at: raw)
                 message = ""
             } catch {

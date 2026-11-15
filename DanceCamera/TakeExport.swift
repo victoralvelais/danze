@@ -1,4 +1,5 @@
 import AVFoundation
+import OSLog
 
 struct TakeError: LocalizedError {
     let errorDescription: String?
@@ -6,13 +7,15 @@ struct TakeError: LocalizedError {
 }
 
 enum TakeExport {
+    private static let log = Logger(subsystem: "dev.codexxp.dancecamera", category: "soundtrack")
     struct ExportError: LocalizedError {
         let errorDescription: String?
         init(_ message: String) { errorDescription = message }
     }
 
     // The offset is signed: the tap can already be playing when the camera starts.
-    static func save(video: URL, audio: URL?, audioOffset: Double, speeds: [SpeedChange] = [], videoStart: Double = 0, to destination: URL) async throws -> CGSize {
+    static func save(video: URL, audio: URL?, audioOffset: Double, speeds: [SpeedChange] = [], videoStart: Double = 0,
+                     source: SourceSoundtrack? = nil, to destination: URL) async throws -> CGSize {
         let videoAsset = AVURLAsset(url: video)
         let timeline = AVMutableComposition()
         guard let image = try await videoAsset.loadTracks(withMediaType: .video).first,
@@ -34,11 +37,39 @@ enum TakeExport {
         defer { try? FileManager.default.removeItem(at: rendered) }
         if scaled { retime(picture, using: ranges) }
         if let audio {
-            if scaled {
-                try renderAudio(audio, offset: audioOffset, ranges: ranges, to: rendered)
-                try await addSoundtrack(rendered, offset: 0, videoDuration: picture.timeRange.duration, to: timeline, temporaryAAC: aac)
+            var usedSource = false
+            if let source, let start = source.offset(videoStart: videoStart, duration: v.duration.seconds),
+               !scaled || ranges.allSatisfy({ abs($0.rate - source.first.rate) < 0.0001 }) {
+                do {
+                    var url = source.file.url, offset = -start
+                    if !scaled && source.first.rate != 1 {
+                        let range = TakeSpeedRange(start: 0, end: v.duration.seconds * source.first.rate, rate: 1 / source.first.rate)
+                        try renderAudio(url, offset: offset, ranges: [range], to: rendered)
+                        url = rendered
+                        offset = 0
+                    }
+                    guard try await addSoundtrack(url, offset: offset, videoDuration: picture.timeRange.duration,
+                                                  to: timeline, temporaryAAC: aac) else {
+                        throw ExportError("The source recording does not span the take.")
+                    }
+                    usedSource = true
+                    log.info("Used clock-verified decoded song audio.")
+                } catch {
+                    for track in timeline.tracks(withMediaType: .audio) { timeline.removeTrack(track) }
+                    try? FileManager.default.removeItem(at: aac)
+                    try? FileManager.default.removeItem(at: rendered)
+                    log.info("Using mixer recording after source render or encode failure.")
+                }
             } else {
-                try await addSoundtrack(audio, offset: audioOffset, videoDuration: v.duration, to: timeline, temporaryAAC: aac)
+                log.info("Using mixer recording: source transport, timing or frame coverage unavailable.")
+            }
+            if !usedSource {
+                if scaled {
+                    try renderAudio(audio, offset: audioOffset, ranges: ranges, to: rendered)
+                    try await addSoundtrack(rendered, offset: 0, videoDuration: picture.timeRange.duration, to: timeline, temporaryAAC: aac)
+                } else {
+                    try await addSoundtrack(audio, offset: audioOffset, videoDuration: v.duration, to: timeline, temporaryAAC: aac)
+                }
             }
         }
         guard let mux = AVAssetExportSession(asset: timeline, presetName: AVAssetExportPresetPassthrough),
@@ -48,8 +79,9 @@ enum TakeExport {
         return size
     }
 
+    @discardableResult
     private static func addSoundtrack(_ url: URL, offset: Double, videoDuration: CMTime,
-                                      to timeline: AVMutableComposition, temporaryAAC: URL) async throws {
+                                      to timeline: AVMutableComposition, temporaryAAC: URL) async throws -> Bool {
         guard offset.isFinite else { throw ExportError("Audio and camera clocks could not be aligned.") }
         let source = AVURLAsset(url: url)
         guard let pcm = try await source.loadTracks(withMediaType: .audio).first else {
@@ -60,7 +92,7 @@ enum TakeExport {
         let place = CMTimeMaximum(.zero, delta)
         let skip = CMTimeMaximum(.zero, .zero - delta)
         let overlap = CMTimeMinimum(videoDuration - place, a.duration - skip)
-        guard overlap.isNumeric, overlap > .zero else { return }
+        guard overlap.isNumeric, overlap > .zero else { return false }
 
         guard let encoder = AVAssetExportSession(asset: source, presetName: AVAssetExportPresetAppleM4A) else {
             throw ExportError("The soundtrack encoder is unavailable.")
@@ -73,8 +105,9 @@ enum TakeExport {
         else { throw ExportError("The recorded soundtrack could not be added.") }
         let range = try await song.load(.timeRange)
         let duration = CMTimeMinimum(overlap, range.duration)
-        guard duration > .zero else { return }
+        guard duration > .zero else { return false }
         try sound.insertTimeRange(CMTimeRange(start: range.start, duration: duration), of: song, at: place)
+        return true
     }
 
     private static func retime(_ track: AVMutableCompositionTrack, using ranges: [TakeSpeedRange]) {

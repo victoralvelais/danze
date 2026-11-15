@@ -7,6 +7,7 @@ struct SoundtrackTake {
     /// Presentation of the first CAF frame, in CMClock host-clock seconds.
     let speedChanges: [SpeedChange]
     let firstAudioHostTime: TimeInterval
+    var source: SourceSoundtrack?
 }
 
 @MainActor
@@ -60,6 +61,9 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private let graph = AVAudioEngine()
     private let node = AVAudioPlayerNode()
     private let tap = MusicTap()
+    private let sourceAudio = SourceAudioCapture()
+    private var stableFrom = Double.infinity
+    private var sourceClockReliable = true
     private let pitch = AVAudioUnitTimePitch()
     private var rate = 1.0
     private var outputDelay = 0.0
@@ -82,6 +86,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private var parser: IncrementalDecoder?
     private var libraryReader: LibraryPCMReader?
     private var configurationObserver: NSObjectProtocol?
+    private var routeObserver: NSObjectProtocol?
 
     override init() {
         super.init()
@@ -92,20 +97,33 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         ) { [weak self] _ in
             guard let self else { return }
             self.queue.async {
+                self.sourceAudio.cancel()
                 if self.configured && !self.graph.isRunning {
                     self.fail(TakeError("Audio output changed. Select Play to use the new route."))
                 }
+            }
+        }
+        routeObserver = NotificationCenter.default.addObserver(forName: AVAudioSession.routeChangeNotification,
+                                                               object: nil, queue: nil) { [weak self] _ in
+            guard let self else { return }
+            self.queue.async {
+                self.sourceAudio.cancel()
+                if self.running { self.markSpeed(self.rate) }
             }
         }
     }
 
     deinit {
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
+        if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
     }
 
     func setRate(_ value: Double) {
         queue.async {
-            self.rate = min(2, max(0.5, value))
+            let tuned = min(2, max(0.5, value))
+            guard self.rate != tuned else { return }
+            self.sourceAudio.cancel()
+            self.rate = tuned
             self.pitch.rate = Float(self.rate)
             if self.running { self.markSpeed(self.rate) }
             if !self.paused && self.suspended && self.bufferedSeconds < 2 { self.network?.resume(); self.suspended = false }
@@ -114,7 +132,29 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
 
     private func markSpeed(_ value: Double) {
         let now = AVAudioTime.seconds(forHostTime: mach_absolute_time())
+        stableFrom = now + presentationDelay
         tap.speed(value, host: now + outputDelay + pitch.latency)
+    }
+
+    private var presentationDelay: Double {
+        // The player's downstream total can already include the pitch unit and
+        // route. Only use the known component sum as a lower bound.
+        let routeDelay = max(graph.mainMixerNode.outputPresentationLatency, graph.outputNode.presentationLatency,
+                             AVAudioSession.sharedInstance().outputLatency)
+        return max(node.outputPresentationLatency, routeDelay + pitch.latency)
+    }
+
+    private func sourceAnchor() -> PlayerAnchor? {
+        guard sourceClockReliable, running, !paused, graph.isRunning, node.isPlaying, let render = node.lastRenderTime,
+              render.isHostTimeValid, render.isSampleTimeValid, let player = node.playerTime(forNodeTime: render),
+              player.isSampleTimeValid, player.sampleTime >= 0, player.sampleRate > 0 else { return nil }
+        let host = AVAudioTime.seconds(forHostTime: render.hostTime)
+        let now = AVAudioTime.seconds(forHostTime: mach_absolute_time())
+        guard abs(now - host) < 0.5 else { return nil }
+        let route = AVAudioSession.sharedInstance().currentRoute.outputs.map(\.uid)
+        guard !route.isEmpty else { return nil }
+        return PlayerAnchor(host: host + presentationDelay, song: Double(player.sampleTime) / player.sampleRate,
+                            rate: rate, route: route)
     }
 
     func play(_ source: MusicSource, callback: @escaping (State) -> Void) {
@@ -168,6 +208,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     func pause() {
         queue.async {
             guard self.lastState == .playing || self.lastState == .buffering else { return }
+            self.sourceAudio.cancel()
             self.paused = true
             if self.running { self.node.pause(); self.markSpeed(1) }
             self.running = false
@@ -187,13 +228,24 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
             if self.eof || self.bufferedSeconds >= 0.85 { self.startNode() } else { self.report(.buffering) }
         }
     }
-    func beginTake() throws { try queue.sync { try tap.begin() } }
-    func discardTake() { queue.sync { tap.discard() } }
+    func beginTake() throws {
+        try queue.sync {
+            try tap.begin()
+            sourceAudio.begin(sourceAnchor(), stableFrom: stableFrom)
+        }
+    }
+
+    func discardTake() { queue.sync { sourceAudio.cancel(); tap.discard() } }
 
     func finishTake() async throws -> SoundtrackTake? {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
-                do { continuation.resume(returning: try self.tap.finish()) }
+                let source = self.sourceAudio.finish(self.sourceAnchor())
+                do {
+                    var take = try self.tap.finish()
+                    take?.source = source
+                    continuation.resume(returning: take)
+                }
                 catch { continuation.resume(throwing: error) }
             }
         }
@@ -202,9 +254,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private func configure(_ format: AVAudioFormat) throws {
         guard !configured else { return }
         guard format.sampleRate > 0, format.channelCount > 0 else { throw TakeError("No playable audio format.") }
-        graph.connect(node, to: pitch, format: format)
-        graph.connect(pitch, to: graph.mainMixerNode, format: format)
-        pitch.rate = Float(rate)
+        connectMusicPlayer(node, through: pitch, to: graph, format: format, rate: rate)
         let mixed = graph.mainMixerNode.outputFormat(forBus: 0)
         guard mixed.channelCount > 0, mixed.sampleRate > 0 else { throw TakeError("No audio output is available.") }
         try tap.install(on: graph.mainMixerNode, format: mixed)
@@ -225,6 +275,9 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
 
     private func reset() {
         if running { markSpeed(1) }
+        sourceAudio.reset()
+        stableFrom = .infinity
+        sourceClockReliable = true
         playbackID = UUID()
         nextBuffer = nil
         finishingTail = false
@@ -278,6 +331,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
 
     // Keep one buffer in hand so only the real last buffer waits for hardware playback.
     private func schedule(_ buffer: AVAudioPCMBuffer) {
+        sourceAudio.append(buffer)
         if let previous = nextBuffer { enqueue(previous, last: false) }
         nextBuffer = buffer
     }
@@ -291,16 +345,22 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
             self.queue.async {
                 guard self.playbackID == id else { return }
                 self.pendingFrames -= count
+                self.sourceAudio.didRender(count)
                 if !self.paused && self.suspended && self.bufferedSeconds < 2 {
                     self.network?.resume()
                     self.suspended = false
                 }
                 do { try self.fillLocal() } catch { self.fail(error); return }
                 if last {
+                    self.sourceAudio.cancel()
                     self.running = false
                     self.tap.speed(1, host: AVAudioTime.seconds(forHostTime: mach_absolute_time()))
                     self.report(.ended)
                 } else if self.pendingFrames == 0 && !self.paused && !self.finishingTail {
+                    // After a real underrun, the node clock may have advanced
+                    // through silence before this completion reached our queue.
+                    self.sourceClockReliable = false
+                    self.sourceAudio.cancel()
                     self.node.pause()
                     self.running = false
                     self.markSpeed(1)

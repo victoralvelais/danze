@@ -35,7 +35,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          xcrun swiftc -target "$(uname -m)-apple-macos15.0" DanceCamera/TakeExport.swift DanceCamera/AudioTiming.swift DanceCamera/IncrementalDecoder.swift Checks/TakeExportCheck.swift -o "$RUNNER_TEMP/check-takes"
+          xcrun swiftc -target "$(uname -m)-apple-macos15.0" DanceCamera/TakeExport.swift DanceCamera/AudioTiming.swift DanceCamera/SourceSoundtrack.swift DanceCamera/IncrementalDecoder.swift Checks/TakeExportCheck.swift Checks/SourceAudioCheck.swift -o "$RUNNER_TEMP/check-takes"
           "$RUNNER_TEMP/check-takes"
 
       - name: Package and verify IPA
