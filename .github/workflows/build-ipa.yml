@@ -39,10 +39,17 @@ jobs:
           "$RUNNER_TEMP/check-takes"
 
       - name: Package and verify IPA
+        id: package
         shell: bash
         run: |
           set -euo pipefail
           bundle="$RUNNER_TEMP/products/$APP.app"
+          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$bundle/Info.plist")"
+          build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$bundle/Info.plist")"
+          [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ && "$build" == "$GITHUB_RUN_NUMBER" ]]
+          tag="v$version-build.$build"
+          filename="$APP-$tag.ipa"
+          ipa="$RUNNER_TEMP/$filename"
           executable="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$bundle/Info.plist")"
           test -x "$bundle/$executable"
           xcrun lipo "$bundle/$executable" -verify_arch arm64
@@ -51,15 +58,18 @@ jobs:
           mkdir -p "$RUNNER_TEMP/package/Payload"
           /usr/bin/ditto "$bundle" "$RUNNER_TEMP/package/Payload/$APP.app"
           cd "$RUNNER_TEMP/package"
-          /usr/bin/zip -q -r -y "$RUNNER_TEMP/$APP.ipa" Payload
-          unzip -tq "$RUNNER_TEMP/$APP.ipa"
-          unzip -Z1 "$RUNNER_TEMP/$APP.ipa" | grep -Fx "Payload/$APP.app/$executable"
-          unzip -Z1 "$RUNNER_TEMP/$APP.ipa" | grep -Fx "Payload/$APP.app/Info.plist"
+          /usr/bin/zip -q -r -y "$ipa" Payload
+          unzip -tq "$ipa"
+          unzip -Z1 "$ipa" | grep -Fx "Payload/$APP.app/$executable"
+          unzip -Z1 "$ipa" | grep -Fx "Payload/$APP.app/Info.plist"
+          echo "filename=$filename" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
       - name: Upload IPA
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          path: ${{ runner.temp }}/DanceCamera.ipa
+          path: ${{ runner.temp }}/${{ steps.package.outputs.filename }}
           archive: false
           if-no-files-found: error
           overwrite: true
@@ -67,26 +77,24 @@ jobs:
       - name: Publish versioned GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.package.outputs.tag }}
+          VERSION: ${{ steps.package.outputs.version }}
+          FILENAME: ${{ steps.package.outputs.filename }}
         shell: bash
         run: |
           set -euo pipefail
-          plist="$RUNNER_TEMP/products/$APP.app/Info.plist"
-          version="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$plist")"
-          build="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$plist")"
-          [[ "$version" =~ ^[0-9]+(\.[0-9]+){0,2}$ && "$build" == "$GITHUB_RUN_NUMBER" ]]
-          tag="v$version-build.$build"
-          ipa="$RUNNER_TEMP/$APP.ipa"
+          ipa="$RUNNER_TEMP/$FILENAME"
           # A retry can finish an interrupted draft. Published builds keep their original binary.
-          if release="$(gh release view "$tag" --json isDraft,targetCommitish,assets)"; then
+          if release="$(gh release view "$TAG" --json isDraft,targetCommitish,assets)"; then
             if [[ "$(jq -r '.isDraft' <<< "$release")" == "true" ]]; then
               [[ "$(jq -r '.targetCommitish' <<< "$release")" == "$GITHUB_SHA" ]]
-              gh release upload "$tag" "$ipa" --clobber
-              gh release edit "$tag" --draft=false
+              gh release upload "$TAG" "$ipa" --clobber
+              gh release edit "$TAG" --draft=false
             else
-              [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$tag" --jq .sha)" == "$GITHUB_SHA" ]]
-              jq -e --arg asset "$APP.ipa" 'any(.assets[]; .name == $asset and .size > 0 and .state == "uploaded")' <<< "$release"
+              [[ "$(gh api "repos/$GITHUB_REPOSITORY/commits/$TAG" --jq .sha)" == "$GITHUB_SHA" ]]
+              jq -e --arg asset "$FILENAME" 'any(.assets[]; .name == $asset and .size > 0 and .state == "uploaded")' <<< "$release"
             fi
           else
-            gh release create "$tag" "$ipa" --target "$GITHUB_SHA" \
-              --title "$APP $version (build $build)" --notes "LiveContainer IPA from commit $GITHUB_SHA."
+            gh release create "$TAG" "$ipa" --target "$GITHUB_SHA" \
+              --title "$APP $VERSION (build $GITHUB_RUN_NUMBER)" --notes "LiveContainer IPA from commit $GITHUB_SHA."
           fi
