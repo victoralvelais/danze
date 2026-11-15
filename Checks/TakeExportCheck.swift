@@ -74,8 +74,175 @@ struct TakeExportCheck {
         for i in 0..<400 {
             let frame = Int64((i + (i >= 200 ? 1 : 0)) * block)
             let jitter = i > 0 && i.isMultiple(of: 30) ? 0.011 : 0.0
-            let place = clock.position(sample: frame, host: 10 + Double(frame) / rate + jitter, count: block, rate: rate)
+            let stamp = MixerStamp(sample: frame, clockRate: rate, host: 10 + Double(frame) / rate + jitter)
+            guard let place = clock.position(stamp, count: block, pcmRate: rate) else { throw TakeError("Missing block position.") }
             try require(Int64(((place - 10) * rate).rounded()) == frame, "Mixer callback jitter altered the sample timeline.")
+        }
+        // The sample counter can have a different rate from the copied PCM. Only
+        // the first block supplies a host anchor. All following audio is usable.
+        for (clockRate, pcmRate) in [(44_100.0, 48_000.0), (48_000.0, 44_100.0)] {
+            var mixedClock = MixerTimeline()
+            let frames = 1024
+            for i in 0..<256 {
+                let start = i * frames
+                let stamp = Int64((Double(start) * clockRate / pcmRate).rounded())
+                let time = MixerStamp(sample: stamp, clockRate: clockRate, host: i == 0 ? 20 : nil)
+                let place = mixedClock.position(time, count: frames, pcmRate: pcmRate)
+                guard let place else { throw TakeError("Dropped a sample-only mixer block after anchoring.") }
+                let written = Int(((place - 20) * pcmRate).rounded())
+                try require(abs(written - start) <= 1, "Mixed-rate clocks created an artificial gap or overlap.")
+            }
+        }
+        var overlaps = MixerTimeline()
+        func at(_ sample: Int64, _ host: Double? = nil) throws -> Int {
+            guard let time = overlaps.position(MixerStamp(sample: sample, clockRate: 48_000, host: host), count: 480, pcmRate: 48_000)
+            else { throw TakeError("Missing anchored mixer timestamp.") }
+            return Int(((time - 20) * 48_000).rounded())
+        }
+        try require(overlaps.position(MixerStamp(sample: 0, clockRate: 48_000, host: nil), count: 480, pcmRate: 48_000) == nil,
+                    "An unanchored sample timestamp invented a camera time.")
+        let offsets = try [at(960, 20), at(960), at(1200), at(1680), at(1200, 20.005), at(0, 20.1)]
+        try require(offsets == [0, 0, 240, 720, 240, 4800], "Duplicated, overlapping or restarted sample clocks were misaligned.")
+        for clockRate in [44_100.0, 48_000.0] {
+            for permanentGap in [false, true] {
+                var clock = MixerTimeline(), written = 0
+                let frames = 480
+                let stamps = (0..<20).map { i -> MixerStamp in
+                    let frame = i * frames + (i == 8 || (permanentGap && i > 8) ? 720 : 0)
+                    let tick = Int64((Double(frame) * clockRate / 48_000).rounded())
+                    return MixerStamp(sample: tick, clockRate: clockRate, host: 10 + Double(i * frames) / 48_000)
+                }
+                for i in stamps.indices {
+                    let next = i + 1 < stamps.count ? stamps[i + 1] : nil
+                    guard let time = clock.position(stamps[i], count: frames, pcmRate: 48_000, followedBy: next)
+                    else { throw TakeError("Missing mixer block while testing a clock jump.") }
+                    let difference = Int(((time - 10) * 48_000).rounded()) - written
+                    if permanentGap && i == 8 {
+                        try require(abs(difference - 720) <= 1, "A real 15 ms gap changed duration.")
+                        written += difference
+                    } else {
+                        try require(abs(difference) <= 1, "Contiguous PCM needed a splice after a clock jump.")
+                    }
+                    written += frames
+                }
+            }
+        }
+    }
+
+    static func checkGapEdges() throws {
+        // Start and end at opposite waveform peaks. A zero-filled hole would
+        // produce a full-scale step at both ends. Fill in chunks, like the CAF writer.
+        for length in [2, 48, 180, 12_000] {
+            let gap = MixerGap(length: Int64(length), rate: 48_000)
+            var waveform: [Float] = [0.8]
+            var offset = 0
+            while offset < length {
+                var chunk = Array(repeating: Float.nan, count: min(4096, length - offset))
+                chunk.withUnsafeMutableBufferPointer { gap.fill($0, at: Int64(offset), from: 0.8, to: -0.8) }
+                waveform.append(contentsOf: chunk)
+                offset += chunk.count
+            }
+            waveform.append(-0.8)
+            let maxStep = zip(waveform, waveform.dropFirst()).map { abs($1 - $0) }.max()!
+            let limit: Float = 1.6 / Float(min(length + 1, 144))
+            try require(waveform.count == length + 2 && maxStep <= limit + 0.0001, "An audio gap introduced a sharp edge.")
+            if length > 4096 { try require(waveform[length / 2] == 0, "The interior of a long audio gap must remain silent.") }
+        }
+    }
+
+    static func writeMixerTone(to url: URL) throws -> [[Float]] {
+        let rate = 44_100.0, block = 441, count = 200
+        let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
+        let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(block))!
+        pcm.frameLength = pcm.frameCapacity
+        let recording = try MixerRecording(url: url, format: format, origin: 10)
+        var timeline = MixerTimeline()
+        var expected = [[Float](), [Float]()]
+        let stamps = (0..<count).map { i -> MixerStamp in
+            // At 0.85× export, the first two 17.25 ms false jumps land near
+            // 0.28 and 0.54 seconds. Intermediate blocks can carry sample time only.
+            let jump = i >= 33 && (i - 33).isMultiple(of: 30)
+            return MixerStamp(sample: Int64(i * 480 + (jump ? 828 : 0)), clockRate: 48_000,
+                              host: i == 0 || jump ? 10 + Double(i) / 100 : nil)
+        }
+        for i in stamps.indices {
+            let following = i + 1 < stamps.count ? stamps[i + 1] : nil
+            guard let time = timeline.position(stamps[i], count: block, pcmRate: rate, followedBy: following) else {
+                throw TakeError("The recorder lost a timed tone block.")
+            }
+            for ch in 0..<2 {
+                for j in 0..<block {
+                    let angle = 2 * Double.pi * Double(i * block + j) * (ch == 0 ? 440 : 660) / rate
+                    let value = Float(0.35 * sin(angle))
+                    pcm.floatChannelData![ch][j] = value
+                    expected[ch].append(value)
+                }
+            }
+            try recording.append(pcm, host: time)
+        }
+        return expected
+    }
+
+    static func checkExportedTone(_ mov: URL, _ root: URL) async throws {
+        let caf = root.appendingPathComponent("mixer.caf")
+        let expected = try writeMixerTone(to: caf)
+        let captured = try AVAudioFile(forReading: caf)
+        try require(captured.length == Int64(expected[0].count), "Clock corrections changed the captured duration.")
+        let raw = AVAudioPCMBuffer(pcmFormat: captured.processingFormat, frameCapacity: UInt32(captured.length))!
+        try captured.read(into: raw)
+        for ch in 0..<2 {
+            let samples = UnsafeBufferPointer(start: raw.floatChannelData![ch], count: Int(raw.frameLength))
+            try require(samples.elementsEqual(expected[ch]), "A timestamp fault changed real captured audio.")
+        }
+
+        let target = root.appendingPathComponent("mixer-retimed.mp4")
+        _ = try await TakeExport.save(video: mov, audio: caf, audioOffset: 0,
+                                      speeds: [SpeedChange(host: 10, rate: 0.85)], videoStart: 10, to: target)
+        let asset = AVURLAsset(url: target)
+        guard let track = try await asset.loadTracks(withMediaType: .audio).first else { throw TakeError("Missing exported tone.") }
+        let reader = try AVAssetReader(asset: asset)
+        let out = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            AVFormatIDKey: kAudioFormatLinearPCM, AVLinearPCMBitDepthKey: 32,
+            AVLinearPCMIsFloatKey: true, AVLinearPCMIsNonInterleaved: false
+        ])
+        reader.add(out)
+        try require(reader.startReading(), "Could not decode the exported tone.")
+        // A 15 ms dropout contains at least one complete 5 ms bin. Exclude
+        // the first and last 100 ms for TimePitch startup and AAC boundaries.
+        let bins = 340  // Two seconds of video at 0.85×, in 5 ms bins.
+        var energy = Array(repeating: [0.0, 0.0], count: bins)
+        var counts = Array(repeating: 0, count: bins)
+        while let sample = out.copyNextSampleBuffer() {
+            guard let data = CMSampleBufferGetDataBuffer(sample),
+                  let desc = CMSampleBufferGetFormatDescription(sample),
+                  let fmt = CMAudioFormatDescriptionGetStreamBasicDescription(desc)?.pointee,
+                  fmt.mChannelsPerFrame == 2 else { throw TakeError("Expected decoded stereo PCM.") }
+            let bytes = CMBlockBufferGetDataLength(data)
+            guard bytes > 0 else { continue }
+            var values = Array(repeating: Float.zero, count: bytes / MemoryLayout<Float>.size)
+            let status = values.withUnsafeMutableBytes {
+                CMBlockBufferCopyDataBytes(data, atOffset: 0, dataLength: $0.count, destination: $0.baseAddress!)
+            }
+            try require(status == noErr, "Could not read decoded tone samples.")
+            let start = CMSampleBufferGetPresentationTimeStamp(sample).seconds
+            for f in 0..<(values.count / 2) {
+                let bin = Int(floor((start + Double(f) / fmt.mSampleRate) * 200))
+                guard counts.indices.contains(bin) else { continue }
+                counts[bin] += 1
+                for ch in 0..<2 {
+                    let v = Double(values[2 * f + ch])
+                    energy[bin][ch] += v * v
+                }
+            }
+        }
+        try require(reader.status == .completed, "The exported tone could not be decoded completely.")
+        for bin in 20..<(bins - 20) {
+            try require(counts[bin] > 0, "Missing AAC samples at \(bin * 5) ms.")
+            for ch in 0..<2 {
+                let rms = sqrt(energy[bin][ch] / Double(counts[bin]))
+                // The reference sinusoid has RMS 0.247. Fail on a >12 dB dip.
+                try require(rms > 0.062, "Exported channel \(ch + 1) dipped at \(bin * 5) ms (RMS \(rms)).")
+            }
         }
     }
 
@@ -124,12 +291,14 @@ struct TakeExportCheck {
 
     static func main() async throws {
         try checkMixerTiming()
+        try checkGapEdges()
         try checkStream()
         let root = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         let mov = root.appendingPathComponent("camera.mov"), caf = root.appendingPathComponent("sound.caf")
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "Checks/camera.mov"), to: mov)
+        try await checkExportedTone(mov, root)
         try audio(caf)
         try await checkVariableSpeed(mov, caf, root)
         let original = AVURLAsset(url: mov), cam = try await original.loadTracks(withMediaType: .video).first!

@@ -380,6 +380,7 @@ private final class MusicTap {
     private var history: [Block] = []
     private var epoch = UUID()
     private var timeline = MixerTimeline()
+    private var pending: (pcm: AVAudioPCMBuffer, stamp: MixerStamp)?
     private var speedHistory: [SpeedChange] = []
     private var recordedSpeeds: [SpeedChange] = []
 
@@ -396,9 +397,8 @@ private final class MusicTap {
     private var installed = false
     private var latency = 0.0
     private var takeOpen = false
-    private var file: AVAudioFile?
+    private var recording: MixerRecording?
     private var destination: URL?
-    private var origin: Double?
     private var writeError: Error?
 
     func install(on mixer: AVAudioMixerNode, format: AVAudioFormat) throws {
@@ -408,7 +408,7 @@ private final class MusicTap {
         let id = UUID()
         writer.sync { epoch = id; history.removeAll(); timeline = MixerTimeline(); latency = 0 }
         mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, time in
-            guard let self, time.isHostTimeValid, buffer.frameLength > 0 else { return }
+            guard let self, buffer.frameLength > 0, time.isHostTimeValid || time.isSampleTimeValid else { return }
             guard self.backlog.wait(timeout: .now()) == .success else {
                 // Do not block the render thread or create an unbounded queue. If
                 // disk I/O fell behind, fail this take instead of inventing audio.
@@ -419,20 +419,16 @@ private final class MusicTap {
                 }
                 return
             }
-            guard let copy = Self.copy(buffer, from: 0) else { self.backlog.signal(); return }
-            let timestamp = AVAudioTime.seconds(forHostTime: time.hostTime)
+            guard let copy = buffer.mixerCopy() else { self.backlog.signal(); return }
+            let timestamp = time.isHostTimeValid ? AVAudioTime.seconds(forHostTime: time.hostTime) : nil
             let sample = time.isSampleTimeValid ? time.sampleTime : nil
+            let clockRate = time.isSampleTimeValid ? time.sampleRate : 0
             self.writer.async {
                 defer { self.backlog.signal() }
                 guard self.epoch == id else { return }
-                let host = self.timeline.position(sample: sample, host: timestamp + self.latency,
-                                                  count: Int(copy.frameLength), rate: copy.format.sampleRate)
-                let block = Block(pcm: copy, host: host)
-                self.history.append(block)
-                while let first = self.history.first, block.host - first.host > 2 {
-                    self.history.removeFirst()
-                }
-                if self.takeOpen { self.append(block) }
+                let stamp = MixerStamp(sample: sample, clockRate: clockRate, host: timestamp.map { $0 + self.latency })
+                self.flushPending(followedBy: stamp)
+                self.pending = (copy, stamp)
             }
         }
         installed = true
@@ -440,11 +436,23 @@ private final class MusicTap {
 
     func setLatency(_ value: Double) { writer.sync { latency = value.isFinite ? max(0, value) : 0 } }
 
+    private func flushPending(followedBy following: MixerStamp? = nil) {
+        guard let pending else { return }
+        self.pending = nil
+        let pcm = pending.pcm
+        guard let host = timeline.position(pending.stamp, count: Int(pcm.frameLength), pcmRate: pcm.format.sampleRate,
+                                           followedBy: following) else { return }
+        let block = Block(pcm: pcm, host: host)
+        history.append(block)
+        while let first = history.first, block.host - first.host > 2 { history.removeFirst() }
+        if takeOpen { append(block) }
+    }
+
     func uninstall(from mixer: AVAudioMixerNode) {
         guard installed else { return }
         mixer.removeTap(onBus: 0)
         installed = false
-        writer.sync { epoch = UUID(); history.removeAll() }
+        writer.sync { flushPending(); epoch = UUID(); history.removeAll() }
     }
 
     func begin() throws {
@@ -462,10 +470,11 @@ private final class MusicTap {
 
     func finish() throws -> SoundtrackTake? {
         try writer.sync {
+            flushPending()
             if let error = writeError { clear(removing: true); throw error }
             let result: SoundtrackTake?
-            if let url = destination, let host = origin, let file, file.length > 0 {
-                result = SoundtrackTake(url: url, speedChanges: recordedSpeeds, firstAudioHostTime: host)
+            if let url = destination, let recording, recording.file.length > 0 {
+                result = SoundtrackTake(url: url, speedChanges: recordedSpeeds, firstAudioHostTime: recording.origin)
             } else { result = nil }
             clear(removing: result == nil)
             return result
@@ -473,10 +482,9 @@ private final class MusicTap {
     }
 
     private func clear(removing: Bool) {
-        file = nil // close and finalize the CAF header before the exporter opens it
+        recording = nil // close and finalize the CAF header before the exporter opens it
         if removing, let destination { try? FileManager.default.removeItem(at: destination) }
         destination = nil
-        origin = nil
         writeError = nil
         takeOpen = false
         recordedSpeeds = []
@@ -485,52 +493,13 @@ private final class MusicTap {
     private func append(_ block: Block) {
         guard writeError == nil else { return }
         do {
-            if file == nil {
+            if recording == nil {
                 let url = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf")
                 destination = url
-                file = try AVAudioFile(forWriting: url, settings: block.pcm.format.settings)
-                origin = block.host
+                recording = try MixerRecording(url: url, format: block.pcm.format, origin: block.host)
             }
-            guard let file, let origin else { return }
-            let format = file.processingFormat
-            guard format.sampleRate == block.pcm.format.sampleRate, format.channelCount == block.pcm.format.channelCount else {
-                throw TakeError("Audio output format changed during the take.")
-            }
-            let offset = (block.host - origin) * format.sampleRate
-            guard offset.isFinite, abs(offset) < 86400 * format.sampleRate else { throw TakeError("The audio clock changed unexpectedly.") }
-            var difference = Int64(offset.rounded()) - file.framePosition
-            // Ignore tiny timestamp-to-sample rounding jitter. At a genuine
-            // discontinuity, insert silence or skip duplicated leading samples.
-            if abs(difference) <= 1 { difference = 0 }
-            if difference > 0 {
-                guard let silence = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096),
-                      let channels = silence.floatChannelData else { throw TakeError("Could not align the audio gap.") }
-                for i in 0..<Int(format.channelCount) {
-                    memset(channels[i], 0, 4096 * MemoryLayout<Float>.size)
-                }
-                while difference > 0 {
-                    silence.frameLength = UInt32(min(4096, difference))
-                    try file.write(from: silence)
-                    difference -= Int64(silence.frameLength)
-                }
-            }
-            if difference >= 0 { try file.write(from: block.pcm) }
-            else if -difference < Int64(block.pcm.frameLength), let tail = Self.copy(block.pcm, from: Int(-difference)) {
-                try file.write(from: tail)
-            }
+            try recording?.append(block.pcm, host: block.host)
         } catch { writeError = error }
-    }
-
-    private static func copy(_ buffer: AVAudioPCMBuffer, from start: Int) -> AVAudioPCMBuffer? {
-        let count = Int(buffer.frameLength) - start
-        guard count > 0, let input = buffer.floatChannelData,
-              let pcm = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: UInt32(count)),
-              let output = pcm.floatChannelData else { return nil }
-        pcm.frameLength = UInt32(count)
-        for channel in 0..<Int(buffer.format.channelCount) {
-            output[channel].update(from: input[channel].advanced(by: start), count: count)
-        }
-        return pcm
     }
 }
 
