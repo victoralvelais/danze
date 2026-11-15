@@ -19,7 +19,7 @@ enum PerformedAudioCheck {
                 music.floatChannelData![ch][i] = Float(0.35 * sin(2 * .pi * f * Double(i) / hz))
             }
         }
-        node.scheduleBuffer(music)
+        node.scheduleBuffer(music, at: nil, options: [], completionCallbackType: .dataRendered, completionHandler: nil)
         let events = feed.samples()
         let aac = root.appendingPathComponent("live-encoder.m4a")
         let encoder = Task.detached { try await encode(events, format: format, to: aac) }
@@ -96,7 +96,8 @@ enum PerformedAudioCheck {
                 retries = 0; done += 1
             }
         }
-        p.scheduleBuffer(input); try e.start(); p.play()
+        p.scheduleBuffer(input, at: nil, options: [], completionCallbackType: .dataRendered, completionHandler: nil)
+        try e.start(); p.play()
         try render(68); feed.flush()
         try render(2); feed.flush()
         let next = feed.samples() // Also ends the old stream if a pressure assertion regresses.
@@ -107,7 +108,8 @@ enum PerformedAudioCheck {
         // A new song/route with a later presentation time uses the same open take.
         feed.setLatency(1.5)
         e.prepare(); try feed.install(on: bus.output, drainInterval: .seconds(60))
-        p.scheduleBuffer(input); try e.start(); p.play()
+        p.scheduleBuffer(input, at: nil, options: [], completionCallbackType: .dataRendered, completionHandler: nil)
+        try e.start(); p.play()
         try render(16); feed.flush()
         guard let take = try feed.finish() else { throw TakeError("A ring overrun discarded the whole take.") }
         defer { try? FileManager.default.removeItem(at: take.url) }
@@ -170,6 +172,7 @@ enum PerformedAudioCheck {
     private static func compareClocks(_ played: AVAudioPCMBuffer, root: URL) throws {
         let format = played.format, hz = format.sampleRate, n = 480, count = 180
         var legacy = MixerTimeline(), current = PerformedClock()
+        var prior: AVAudioPCMBuffer?
         let old = try MixerRecording(url: root.appendingPathComponent("old-jitter.caf"), format: format, origin: 10)
         let cleanURL = root.appendingPathComponent("live-jitter.caf")
         var clean: MixerRecording? = try MixerRecording(url: cleanURL, format: format, origin: 10)
@@ -181,11 +184,14 @@ enum PerformedAudioCheck {
             pcm.frameLength = pcm.frameCapacity
             for ch in 0..<2 { pcm.floatChannelData![ch].update(from: played.floatChannelData![ch].advanced(by: i * n), count: n) }
             let next = i + 1 < count ? stamps[i + 1] : nil
-            guard let oldTime = legacy.position(stamps[i], count: n, pcmRate: hz, followedBy: next) else { throw TakeError("No legacy PTS.") }
+            guard let oldTime = legacy.position(stamps[i], count: n, pcmRate: hz, followedBy: next,
+                                                distinctOverlap: { pcm.differsFromPriorOverlap(prior, frames: $0, roundingFrames: $1) })
+            else { throw TakeError("No legacy PTS.") }
             try old.append(pcm, host: oldTime)
             let t = current.position(start: Int64(i * n), frames: n, sample: Double(stamps[i].sample!), host: stamps[i].host,
                                      arrival: stamps[i].host!, latency: 0, earliest: nil)
             try clean?.append(pcm, host: t)
+            prior = pcm
         }
         try TakeExportCheck.require(old.edits.gaps.count > 0 && old.edits.overlaps.count > 0 &&
                                     clean?.edits.gaps.count == 0 && clean?.edits.overlaps.count == 0,
