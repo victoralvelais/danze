@@ -1,59 +1,65 @@
 import AVFoundation
-import CoreImage
 
 @main
 enum CheckRehearsalMovie {
-    struct MissingFrames: LocalizedError {
-        let errorDescription: String? = "The simulator screen recording did not show both upright, unmirrored camera patterns."
+    struct Pixel: CustomStringConvertible {
+        let r: UInt8, g: UInt8, b: UInt8
+        var red: Bool { r > 175 && g < 95 && b < 95 }
+        var blue: Bool { b > 175 && r < 95 && g < 95 }
+        var green: Bool { g > 175 && r < 95 && b < 95 }
+        var yellow: Bool { r > 175 && g > 175 && b < 95 }
+        var white: Bool { min(r, g, b) > 180 }
+        var description: String { "(\(r),\(g),\(b))" }
     }
 
     static func main() async throws {
         let asset = AVURLAsset(url: URL(fileURLWithPath: CommandLine.arguments[1]))
-        let duration = try await asset.load(.duration).seconds
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.maximumSize = CGSize(width: 96, height: 192)
-        generator.requestedTimeToleranceBefore = CMTime(seconds: 0.05, preferredTimescale: 600)
-        generator.requestedTimeToleranceAfter = CMTime(seconds: 0.05, preferredTimescale: 600)
-        let context = CIContext()
-        let rgb = CGColorSpace(name: CGColorSpace.sRGB)!
-        var redBlue = false, greenYellow = false
-        var sampledFrames = 0
-        var example: String?
-        for second in stride(from: 0.0, to: duration, by: 0.2) {
-            // simctl can write variable-rate video. A time during an unchanging
-            // screen may have no nearby encoded frame.
-            guard let result = try? await generator.image(at: CMTime(seconds: second, preferredTimescale: 600)) else { continue }
-            let screen = CIImage(cgImage: result.image)
-            guard screen.extent.height > screen.extent.width else { continue }
-            sampledFrames += 1
-            let width = min(screen.extent.width, screen.extent.height * 9 / 16)
+        guard let track = try await asset.loadTracks(withMediaType: .video).first else { exit(1) }
+        let transform = try await track.load(.preferredTransform)
+        let inverse = transform.inverted()
+        let reader = try AVAssetReader(asset: asset)
+        let output = AVAssetReaderTrackOutput(track: track, outputSettings: [
+            kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA
+        ])
+        output.alwaysCopiesSampleData = false
+        reader.add(output)
+        guard reader.startReading() else { throw reader.error ?? CocoaError(.fileReadUnknown) }
+        var redBlue = false, greenYellow = false, count = 0
+        var lastPattern = ""
+        while let sample = output.copyNextSampleBuffer(), let frame = CMSampleBufferGetImageBuffer(sample) {
+            count += 1
+            CVPixelBufferLockBaseAddress(frame, .readOnly)
+            defer { CVPixelBufferUnlockBaseAddress(frame, .readOnly) }
+            guard let bytes = CVPixelBufferGetBaseAddress(frame)?.assumingMemoryBound(to: UInt8.self) else { continue }
+            let w = CVPixelBufferGetWidth(frame), h = CVPixelBufferGetHeight(frame)
+            let screen = CGRect(x: 0, y: 0, width: w, height: h).applying(transform).standardized
+            guard screen.height > screen.width else { continue }
+            let width = min(screen.width, screen.height * 9 / 16)
             let height = width * 16 / 9
-            // Coordinates are within the full, centered camera frame, measured
-            // from its lower-left corner in Core Image space.
-            func pixel(_ x: CGFloat, _ y: CGFloat) -> [UInt8] {
-                let rect = CGRect(x: floor(screen.extent.midX + (x - 0.5) * width),
-                                  y: floor(screen.extent.midY + (y - 0.5) * height), width: 1, height: 1)
-                var bytes = [UInt8](repeating: 0, count: 4)
-                bytes.withUnsafeMutableBytes { ptr in
-                    context.render(screen, toBitmap: ptr.baseAddress!, rowBytes: 4, bounds: rect, format: .RGBA8, colorSpace: rgb)
-                }
-                return bytes
+            // AVFoundation's track transform maps the native pixels to display coordinates.
+            // Sample the original screen recording in top-left coordinates, without rescaling.
+            func pixel(_ x: CGFloat, _ y: CGFloat) -> Pixel {
+                let display = CGPoint(x: screen.midX + (x - 0.5) * width, y: screen.midY + (y - 0.5) * height)
+                let p = display.applying(inverse)
+                let row = max(0, min(h - 1, Int(p.y))) * CVPixelBufferGetBytesPerRow(frame)
+                let i = row + max(0, min(w - 1, Int(p.x))) * 4
+                return Pixel(r: bytes[i+2], g: bytes[i+1], b: bytes[i])
             }
-            let stripe = pixel(0.125, 0.75), right = pixel(0.875, 0.75)
-            let top = pixel(0.5, 0.75), bottom = pixel(0.5, 0.25)
-            if example == nil && Int(top.prefix(3).max() ?? 0) - Int(top.prefix(3).min() ?? 0) > 150 {
-                example = "top \(top), bottom \(bottom), left stripe \(stripe), right \(right) at \(second) s"
+            let top = pixel(0.5, 0.25), bottom = pixel(0.5, 0.75)
+            let left = pixel(0.125, 0.25), right = pixel(0.875, 0.25)
+            if top.red || top.green || bottom.blue || bottom.yellow {
+                lastPattern = "top \(top), bottom \(bottom), left mark \(left), right \(right), time \(sample.presentationTimeStamp.seconds)"
             }
-            guard stripe.prefix(3).allSatisfy({ $0 > 180 }), right.prefix(3).contains(where: { $0 < 95 }) else { continue }
-            if top[0] > 175 && top[1] < 95 && bottom[2] > 175 && bottom[0] < 95 { redBlue = true }
-            if top[1] > 175 && top[0] < 95 && bottom[0] > 175 && bottom[1] > 175 && bottom[2] < 95 { greenYellow = true }
+            guard left.white && !right.white else { continue }
+            redBlue = redBlue || (top.red && bottom.blue)
+            greenYellow = greenYellow || (top.green && bottom.yellow)
             if redBlue && greenYellow {
                 print("The simulator screen recording captured both moving portrait camera patterns and their left-side orientation mark.")
                 return
             }
         }
-        print("Read \(sampledFrames) portrait images from \(duration) s; red/blue=\(redBlue), green/yellow=\(greenYellow), \(example ?? "no color example").")
-        throw MissingFrames()
+        let details = "Read \(count) screen frames. Red/blue=\(redBlue), green/yellow=\(greenYellow). Last candidate: \(lastPattern). Reader: \(reader.status.rawValue)."
+        FileHandle.standardError.write(Data(("::error::Rehearsal movie missing expected camera picture. " + details + "\n").utf8))
+        exit(1)
     }
 }

@@ -56,6 +56,7 @@ jobs:
           "$RUNNER_TEMP/check-takes"
 
       - name: Rehearse TikTok screen sharing in the iPhone simulator
+        id: rehearsal
         shell: bash
         run: |
           set -euo pipefail
@@ -71,11 +72,13 @@ jobs:
           else:
               sys.exit("No available iPhone simulator")
           ')
-          xcrun simctl bootstatus "$device" -b
+          xcrun simctl bootstatus "$device" -b &
+          boot=$!
           settings=(-project "$APP.xcodeproj" -scheme DanceCameraScreenTests -configuration Debug
                     -destination "platform=iOS Simulator,id=$device" -derivedDataPath "$RUNNER_TEMP/simulator"
                     -parallel-testing-enabled NO SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG)
           xcodebuild "${settings[@]}" build-for-testing
+          wait "$boot"
           xcrun simctl install "$device" "$RUNNER_TEMP/simulator/Build/Products/Debug-iphonesimulator/$APP.app"
           xcrun simctl privacy "$device" grant camera dev.codexxp.dancecamera
           movie="$RUNNER_TEMP/clean-camera-test.mp4"
@@ -88,6 +91,15 @@ jobs:
           trap - EXIT
           xcrun swiftc -parse-as-library -target "$(uname -m)-apple-macos15.0" Checks/CheckRehearsalMovie.swift -o "$RUNNER_TEMP/check-rehearsal"
           "$RUNNER_TEMP/check-rehearsal" "$movie"
+
+      - name: Keep the synthetic rehearsal movie for a failed picture check
+        if: failure() && steps.rehearsal.outcome == 'failure'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: simulated-camera-rehearsal
+          path: ${{ runner.temp }}/clean-camera-test.mp4
+          retention-days: 2
+          if-no-files-found: ignore
 
       - name: Package and verify IPA
         id: package

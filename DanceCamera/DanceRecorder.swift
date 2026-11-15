@@ -163,16 +163,17 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     }
 
     func beginCleanFrames(_ frames: CleanCameraFrames) {
-        guard wantsCamera, !configuring, cleanFrames == nil, !restoringCleanFrames, phase == .idle else { return }
+        guard cleanFrames == nil, !restoringCleanFrames, phase == .idle else { return }
         #if targetEnvironment(simulator) && DEBUG
         if CleanCameraFrames.usesSimulatorFixture {
+            guard UIApplication.shared.applicationState != .background else { return }
             cleanFrames = frames
             cleanIssue = nil
             frames.startSimulatorFixture()
             return
         }
         #endif
-        guard ready else { return }
+        guard wantsCamera, !configuring, ready else { return }
         cleanFrames = frames
         cleanIssue = nil
         let capture = session, movie = self.movie
@@ -193,6 +194,12 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     func endCleanFrames(_ frames: CleanCameraFrames) {
         guard frames === cleanFrames else { return }
         cleanFrames = nil
+        #if targetEnvironment(simulator) && DEBUG
+        if CleanCameraFrames.usesSimulatorFixture {
+            frames.finishRendering()
+            return
+        }
+        #endif
         restoringCleanFrames = true
         // SwiftUI may dismantle the surface during an update. Queue published
         // changes while the private gate excludes a record or flip immediately.

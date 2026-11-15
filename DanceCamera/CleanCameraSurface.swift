@@ -24,10 +24,12 @@ struct CleanCameraSurface: UIViewRepresentable {
 
     func makeCoordinator() -> Coordinator { Coordinator(camera: camera) }
 
-    func makeUIView(context: Context) -> UIImageView {
-        let view = UIImageView()
+    func makeUIView(context: Context) -> UIView {
+        // A camera frame's pixel dimensions must never become the view's
+        // intrinsic size in points. The parent offers the actual screen bounds.
+        let view = UIView()
         view.backgroundColor = .black
-        view.contentMode = .scaleAspectFit
+        view.layer.contentsGravity = .resizeAspect
         view.isOpaque = true
         let coordinator = context.coordinator
         coordinator.display = Task { @MainActor [weak view, weak coordinator] in
@@ -35,7 +37,10 @@ struct CleanCameraSurface: UIViewRepresentable {
             do {
                 for try await image in frames.images {
                     guard !Task.isCancelled, let view else { return }
-                    view.image = UIImage(cgImage: image)
+                    CATransaction.begin()
+                    CATransaction.setDisableActions(true)
+                    view.layer.contents = image
+                    CATransaction.commit()
                 }
             } catch {
                 coordinator?.camera.cleanFramesFailed(frames, message: error.localizedDescription)
@@ -44,13 +49,18 @@ struct CleanCameraSurface: UIViewRepresentable {
         return view
     }
 
-    func updateUIView(_ view: UIImageView, context: Context) { context.coordinator.attach() }
+    func sizeThatFits(_ proposal: ProposedViewSize, uiView: UIView, context: Context) -> CGSize? {
+        guard let width = proposal.width, let height = proposal.height, width.isFinite, height.isFinite else { return nil }
+        return CGSize(width: width, height: height)
+    }
 
-    static func dismantleUIView(_ view: UIImageView, coordinator: Coordinator) {
+    func updateUIView(_ view: UIView, context: Context) { context.coordinator.attach() }
+
+    static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
         coordinator.closed = true
         coordinator.display?.cancel()
         coordinator.camera.endCleanFrames(coordinator.frames)
-        view.image = nil
+        view.layer.contents = nil
     }
 }
 
@@ -111,17 +121,21 @@ final class CleanCameraFrames: NSObject, AVCaptureVideoDataOutputSampleBufferDel
     }
 
     func stop(on session: AVCaptureSession, movie: AVCaptureMovieFileOutput) throws {
-        sink.finish()
         output.setSampleBufferDelegate(nil, queue: nil)
+        finishRendering()
+        guard previousPreset != nil else { return }
+        session.beginConfiguration()
+        defer { session.commitConfiguration() }
+        try restoreOutputs(session, movie: movie)
+    }
+
+    func finishRendering() {
+        sink.finish()
         frameQueue.async {
             self.timer?.cancel()
             self.timer = nil
             self.failed = true
         }
-        guard previousPreset != nil else { return }
-        session.beginConfiguration()
-        defer { session.commitConfiguration() }
-        try restoreOutputs(session, movie: movie)
     }
 
     private func restoreOutputs(_ session: AVCaptureSession, movie: AVCaptureMovieFileOutput) throws {
