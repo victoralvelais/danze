@@ -12,10 +12,15 @@ struct MixerTimeline {
     private var anchor: (sample: Int64, rate: Double, host: Double)?
     private var highestSample: Int64?
     private var nextHost: Double?
+    private var previous: (stamp: MixerStamp, duration: Double)?
+    private(set) var stampAdjustment = 0.0
 
-    mutating func position(_ stamp: MixerStamp, count: Int, pcmRate: Double, followedBy following: MixerStamp? = nil) -> Double? {
+    mutating func position(_ stamp: MixerStamp, count: Int, pcmRate: Double, followedBy following: MixerStamp? = nil,
+                           distinctOverlap: (Int, Int) -> Bool = { _, _ in false }) -> Double? {
+        stampAdjustment = 0
         guard count > 0, pcmRate.isFinite, pcmRate > 0 else { return nil }
         let duration = Double(count) / pcmRate
+        defer { previous = (stamp, duration) }
         let host = stamp.host, clockRate = stamp.clockRate
         let point: Double
         if let sample = stamp.sample, clockRate.isFinite, clockRate > 0 {
@@ -30,7 +35,29 @@ struct MixerTimeline {
                    let following, following.clockRate == clockRate, let nextSample = following.sample,
                    abs(anchor.host + (Double(nextSample) - Double(anchor.sample)) / clockRate - (nextHost + duration)) <= tolerance {
                     self.nextHost = nextHost + duration
+                    stampAdjustment = nextHost - predicted
                     return nextHost
+                }
+                // For a short backward stamp, require both neighboring sample positions
+                // and host intervals to agree. A genuinely replayed slice of the last
+                // buffer stays at its original position even when its host stamp is new.
+                if let nextHost, predicted < nextHost - tolerance, let previous, nextHost - predicted <= previous.duration + tolerance,
+                   pcmRate / clockRate <= 2, let host, let previousHost = previous.stamp.host,
+                   let following, let followingHost = following.host, let followingSample = following.sample,
+                   let previousSample = previous.stamp.sample, previous.stamp.clockRate == clockRate, following.clockRate == clockRate {
+                    let early = nextHost - predicted
+                    let previousEnd = anchor.host + (Double(previousSample) - Double(anchor.sample)) / clockRate + previous.duration
+                    let followingStart = anchor.host + (Double(followingSample) - Double(anchor.sample)) / clockRate
+                    let hostTolerance = max(tolerance, min(0.001, early / 4))
+                    let roundingFrames = clockRate == pcmRate ? 0 : Int(ceil(pcmRate / clockRate))
+                    if abs(previousEnd - nextHost) <= tolerance, abs(followingStart - (nextHost + duration)) <= tolerance,
+                       abs(host - previousHost - previous.duration) <= hostTolerance,
+                       abs(followingHost - host - duration) <= hostTolerance,
+                       distinctOverlap(Int((early * pcmRate).rounded()), roundingFrames) {
+                        self.nextHost = nextHost + duration
+                        stampAdjustment = early
+                        return nextHost
+                    }
                 }
                 // Old or overlapping samples keep their old position. Re-anchor a
                 // backward counter when the host clock places it in a new interval.
@@ -62,6 +89,25 @@ struct MixerTimeline {
     }
 }
 
+struct MixerEdits {
+    struct Events {
+        private(set) var count = 0
+        private(set) var longest = 0.0
+        mutating func record(_ seconds: Double) {
+            count += 1
+            longest = max(longest, seconds)
+        }
+        var summary: String { count == 0 ? "0" : String(format: "%d (largest %.2f ms)", count, longest * 1000) }
+    }
+    var early = Events(), late = Events(), gaps = Events(), overlaps = Events()
+
+    var report: String {
+        ["Mixer capture including pre-roll and tail",
+         "Corrected early timestamps  \(early.summary)", "Corrected late timestamps  \(late.summary)",
+         "Filled gaps  \(gaps.summary)", "Trimmed overlaps  \(overlaps.summary)"].joined(separator: "\n")
+    }
+}
+
 // Shape only the missing PCM frames. Short holes interpolate between the real
 // samples. Longer holes decay to silence and ramp back up over three ms per edge.
 struct MixerGap {
@@ -87,6 +133,7 @@ struct MixerGap {
 final class MixerRecording {
     let file: AVAudioFile
     let origin: Double
+    private(set) var edits = MixerEdits()
     private var lastSamples: [Float]
 
     init(url: URL, format: AVAudioFormat, origin: Double) throws {
@@ -95,7 +142,7 @@ final class MixerRecording {
         lastSamples = Array(repeating: 0, count: Int(format.channelCount))
     }
 
-    func append(_ pcm: AVAudioPCMBuffer, host: Double) throws {
+    func append(_ pcm: AVAudioPCMBuffer, host: Double, stampAdjustment: Double = 0) throws {
         guard pcm.frameLength > 0 else { return }
         let format = file.processingFormat
         guard format.sampleRate == pcm.format.sampleRate, format.channelCount == pcm.format.channelCount else {
@@ -107,7 +154,10 @@ final class MixerRecording {
         // Ignore tiny timestamp-to-sample rounding jitter.
         if abs(difference) <= 1 { difference = 0 }
         guard let source = pcm.floatChannelData else { throw TakeError("Could not read the mixer samples.") }
+        if stampAdjustment > 0 { edits.early.record(stampAdjustment) }
+        if stampAdjustment < 0 { edits.late.record(-stampAdjustment) }
         if difference > 0 {
+            edits.gaps.record(Double(difference) / format.sampleRate)
             let gap = MixerGap(length: difference, rate: format.sampleRate)
             guard let padding = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 4096),
                   let channels = padding.floatChannelData else { throw TakeError("Could not align the audio gap.") }
@@ -124,6 +174,7 @@ final class MixerRecording {
         }
         if difference >= 0 { try file.write(from: pcm) }
         else {
+            edits.overlaps.record(Double(min(-difference, Int64(pcm.frameLength))) / format.sampleRate)
             guard -difference < Int64(pcm.frameLength) else { return }
             guard let tail = pcm.mixerCopy(from: Int(-difference)) else { throw TakeError("Could not trim overlapping mixer audio.") }
             try file.write(from: tail)
@@ -133,6 +184,22 @@ final class MixerRecording {
 }
 
 extension AVAudioPCMBuffer {
+    func differsFromPriorOverlap(_ previous: AVAudioPCMBuffer?, frames: Int, roundingFrames: Int) -> Bool {
+        guard let previous, frames > 0,
+              previous.format.isEqual(format), !format.isInterleaved,
+              let prior = previous.floatChannelData, let current = floatChannelData else { return false }
+        // A lower-resolution sample clock may place the overlap one or two PCM frames
+        // away from the rounded estimate. Preserve a genuine repeat at any such offset.
+        let first = max(1, frames - roundingFrames), last = min(Int(previous.frameLength), frames + roundingFrames)
+        guard first <= last else { return false }
+        for length in first...last {
+            let start = Int(previous.frameLength) - length
+            let bytes = min(Int(frameLength), length) * MemoryLayout<Float>.stride
+            if (0..<Int(format.channelCount)).allSatisfy({ memcmp(prior[$0].advanced(by: start), current[$0], bytes) == 0 }) { return false }
+        }
+        return true
+    }
+
     func mixerCopy(from start: Int = 0) -> AVAudioPCMBuffer? {
         guard start >= 0, start < Int(frameLength) else { return nil }
         let count = Int(frameLength) - start

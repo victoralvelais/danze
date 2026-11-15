@@ -129,6 +129,60 @@ struct TakeExportCheck {
         }
     }
 
+    static func checkBackwardStamps(_ root: URL) throws {
+        let hz = 48_000.0, n = 1024
+        let format = AVAudioFormat(standardFormatWithSampleRate: hz, channels: 2)!
+        let grid = (0..<5).map { $0 * n }
+        let hosts = grid.map { Optional($0) }
+        func check(_ label: String, stamps: [Int], hosts: [Int?], content: [Int], positions: [Int],
+                   clockRate: Double = 48_000, corrected: Int = 0, filled: Int = 0, trimmed: Int = 0) throws {
+            let path = root.appendingPathComponent(label + ".caf")
+            let recording = try MixerRecording(url: path, format: format, origin: 10)
+            var timeline = MixerTimeline(), prior: AVAudioPCMBuffer?
+            let times = zip(stamps, hosts).map { stamp, host in
+                MixerStamp(sample: Int64((Double(stamp) * clockRate / hz).rounded()), clockRate: clockRate, host: host.map { 10 + Double($0) / hz })
+            }
+            for i in times.indices {
+                let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(n))!
+                pcm.frameLength = pcm.frameCapacity
+                // Left is silent. Only the right channel can rule out repeated PCM.
+                pcm.floatChannelData![0].update(repeating: 0, count: n)
+                for j in 0..<n { pcm.floatChannelData![1][j] = Float(content[i] + j) / 8192 }
+                let next = i + 1 < times.count ? times[i + 1] : nil
+                guard let point = timeline.position(times[i], count: n, pcmRate: hz, followedBy: next,
+                                                     distinctOverlap: { pcm.differsFromPriorOverlap(prior, frames: $0, roundingFrames: $1) })
+                else { throw TakeError("Missing timestamp in \(label).") }
+                let rounding = clockRate == hz ? 0 : 1
+                try require(abs(Int(((point - 10) * hz).rounded()) - positions[i]) <= rounding, "Incorrect placement in \(label), buffer \(i).")
+                try recording.append(pcm, host: point, stampAdjustment: timeline.stampAdjustment)
+                prior = pcm
+            }
+            let edits = recording.edits
+            try require(edits.early.count == corrected && edits.gaps.count == (filled > 0 ? 1 : 0) &&
+                        edits.overlaps.count == (trimmed > 0 ? 1 : 0) &&
+                        Int((edits.gaps.longest * hz).rounded()) == filled &&
+                        Int((edits.overlaps.longest * hz).rounded()) == trimmed, "Incorrect mixer report for \(label).")
+        }
+        for slip in [640, n] {
+            var stamps = grid
+            stamps[2] -= slip
+            try check("new-\(slip)", stamps: stamps, hosts: hosts, content: grid, positions: grid, corrected: 1)
+            // Same timestamps, but the audio actually contains repeated samples.
+            try check("replayed-\(slip)", stamps: stamps, hosts: hosts, content: stamps, positions: stamps, filled: slip, trimmed: slip)
+            var late = hosts
+            late[1] = n + 200
+            try check("late-prior-\(slip)", stamps: stamps, hosts: late, content: grid, positions: stamps, filled: slip, trimmed: slip)
+            var missing = hosts
+            missing[3] = nil
+            try check("missing-next-\(slip)", stamps: stamps, hosts: missing, content: grid, positions: stamps, filled: slip, trimmed: slip)
+        }
+        let reset = [20 * n, 21 * n, 0, n, 2 * n]
+        try check("clock-reset", stamps: reset, hosts: hosts, content: grid, positions: grid)
+        let repeated = [0, n, 2 * n - 651, 3 * n, 4 * n]
+        try check("rounded-replay", stamps: repeated, hosts: hosts, content: repeated, positions: repeated,
+                  clockRate: 44_100, filled: 652, trimmed: 652)
+    }
+
     static func checkGapEdges() throws {
         // Start and end at opposite waveform peaks. A zero-filled hole would
         // produce a full-scale step at both ends. Fill in chunks, like the CAF writer.
@@ -153,23 +207,22 @@ struct TakeExportCheck {
     static func writeMixerTone(to url: URL) throws -> [[Float]] {
         let rate = 44_100.0, block = 441, count = 200
         let format = AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2)!
-        let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(block))!
-        pcm.frameLength = pcm.frameCapacity
         let recording = try MixerRecording(url: url, format: format, origin: 10)
         var timeline = MixerTimeline()
+        var prior: AVAudioPCMBuffer?
         var expected = [[Float](), [Float]()]
         let stamps = (0..<count).map { i -> MixerStamp in
-            // At 0.85× export, the first two 17.25 ms false jumps land near
-            // 0.28 and 0.54 seconds. Intermediate blocks can carry sample time only.
+            // Alternate early and late stamps. The stamp clock runs at 48 kHz
+            // and the PCM at 44.1 kHz. Several other blocks have no host stamp.
             let jump = i >= 33 && (i - 33).isMultiple(of: 30)
-            return MixerStamp(sample: Int64(i * 480 + (jump ? 828 : 0)), clockRate: 48_000,
-                              host: i == 0 || jump ? 10 + Double(i) / 100 : nil)
+            let offset = jump ? ((i - 33).isMultiple(of: 60) ? 828 : -320) : 0
+            return MixerStamp(sample: Int64(i * 480 + offset), clockRate: 48_000,
+                              host: i % 30 == 15 ? nil : 10 + Double(i) / 100)
         }
         for i in stamps.indices {
             let following = i + 1 < stamps.count ? stamps[i + 1] : nil
-            guard let time = timeline.position(stamps[i], count: block, pcmRate: rate, followedBy: following) else {
-                throw TakeError("The recorder lost a timed tone block.")
-            }
+            let pcm = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(block))!
+            pcm.frameLength = pcm.frameCapacity
             for ch in 0..<2 {
                 for j in 0..<block {
                     let angle = 2 * Double.pi * Double(i * block + j) * (ch == 0 ? 440 : 660) / rate
@@ -178,8 +231,15 @@ struct TakeExportCheck {
                     expected[ch].append(value)
                 }
             }
-            try recording.append(pcm, host: time)
+            guard let time = timeline.position(stamps[i], count: block, pcmRate: rate, followedBy: following,
+                                               distinctOverlap: { pcm.differsFromPriorOverlap(prior, frames: $0, roundingFrames: $1) }) else {
+                throw TakeError("The recorder lost a timed tone block.")
+            }
+            try recording.append(pcm, host: time, stampAdjustment: timeline.stampAdjustment)
+            prior = pcm
         }
+        try require(recording.edits.late.count == 3 && recording.edits.early.count == 3 &&
+                    recording.edits.gaps.count == 0 && recording.edits.overlaps.count == 0, "Unexpected tone capture report.")
         return expected
     }
 
@@ -296,6 +356,7 @@ struct TakeExportCheck {
         let root = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
+        try checkBackwardStamps(root)
         let mov = root.appendingPathComponent("camera.mov"), caf = root.appendingPathComponent("sound.caf")
         try FileManager.default.copyItem(at: URL(fileURLWithPath: "Checks/camera.mov"), to: mov)
         try await SourceAudioCheck.checkPlayback(mov, root)
@@ -309,11 +370,12 @@ struct TakeExportCheck {
         let transform = try await cam.load(.preferredTransform)
         for (label, offset, includeAudio) in [("before", -0.5, true), ("after", 0.5, true), ("silent", 0, false)] {
             let dest = root.appendingPathComponent("\(label).mp4")
-            let size = try await TakeExport.save(video: mov, audio: includeAudio ? caf : nil, audioOffset: offset, to: dest)
+            let export = try await TakeExport.save(video: mov, audio: includeAudio ? caf : nil, audioOffset: offset, to: dest)
             let result = AVURLAsset(url: dest), pic = try await result.loadTracks(withMediaType: .video).first!
             let frames = try packets(result, pic)
             let t = try await pic.load(.timeRange), tx = try await pic.load(.preferredTransform)
-            try require(size == CGSize(width: 320, height: 192) && tx == transform, "Video geometry changed.")
+            try require(export.size == CGSize(width: 320, height: 192) && tx == transform, "Video geometry changed.")
+            try require(export.audioPath == (includeAudio ? .mix(.noAnchor) : .none), "Wrong audio report for \(label).")
             try require(frames == frameData && abs(t.duration.seconds - duration) < 0.01, "Video frames changed in \(label).")
             let tracks = try await result.loadTracks(withMediaType: .audio)
             if includeAudio {

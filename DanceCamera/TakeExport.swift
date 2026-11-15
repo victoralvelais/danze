@@ -8,14 +8,29 @@ struct TakeError: LocalizedError {
 
 enum TakeExport {
     private static let log = Logger(subsystem: "dev.codexxp.dancecamera", category: "soundtrack")
+    enum AudioPath: Equatable {
+        case none, source, mix(SourceFallback)
+        var description: String {
+            switch self {
+            case .none: return "Camera video without a soundtrack."
+            case .source: return "Decoded song audio."
+            case .mix(let reason): return "Captured mixer audio. " + reason.rawValue
+            }
+        }
+    }
+    struct Result {
+        let size: CGSize
+        let audioPath: AudioPath
+        let recordedRates: [Double]
+    }
     struct ExportError: LocalizedError {
         let errorDescription: String?
         init(_ message: String) { errorDescription = message }
     }
 
     // The offset is signed: the tap can already be playing when the camera starts.
-    static func save(video: URL, audio: URL?, audioOffset: Double, speeds: [SpeedChange] = [], videoStart: Double = 0,
-                     source: SourceSoundtrack? = nil, to destination: URL) async throws -> CGSize {
+    static func save(video: URL, audio: URL?, audioOffset: Double, speeds: [SpeedChange] = [], restoreTempo: Bool = true, videoStart: Double = 0,
+                     source: SourceSoundtrack? = nil, sourceFallback: SourceFallback = .noAnchor, to destination: URL) async throws -> Result {
         let videoAsset = AVURLAsset(url: video)
         let timeline = AVMutableComposition()
         guard let image = try await videoAsset.loadTracks(withMediaType: .video).first,
@@ -31,13 +46,15 @@ enum TakeExport {
             try? FileManager.default.removeItem(at: aac)
             try? FileManager.default.removeItem(at: mp4)
         }
-        let ranges = TakeSpeedRange.ranges(changes: speeds, videoStart: videoStart, duration: v.duration.seconds)
+        let captured = TakeSpeedRange.ranges(changes: speeds, videoStart: videoStart, duration: v.duration.seconds)
+        let ranges = restoreTempo ? captured : []
         let scaled = ranges.contains { abs($0.rate - 1) > 0.0001 }
         let rendered = temporaryFile("caf")
         defer { try? FileManager.default.removeItem(at: rendered) }
         if scaled { retime(picture, using: ranges) }
+        var audioPath = AudioPath.none
         if let audio {
-            var usedSource = false
+            var fallback = source == nil ? sourceFallback : .alignment
             if let source, let start = source.offset(videoStart: videoStart, duration: v.duration.seconds),
                !scaled || ranges.allSatisfy({ abs($0.rate - source.first.rate) < 0.0001 }) {
                 do {
@@ -52,31 +69,32 @@ enum TakeExport {
                                                   to: timeline, temporaryAAC: aac) else {
                         throw ExportError("The source recording does not span the take.")
                     }
-                    usedSource = true
-                    log.info("Used clock-verified decoded song audio.")
+                    audioPath = .source
                 } catch {
                     for track in timeline.tracks(withMediaType: .audio) { timeline.removeTrack(track) }
                     try? FileManager.default.removeItem(at: aac)
                     try? FileManager.default.removeItem(at: rendered)
-                    log.info("Using mixer recording after source render or encode failure.")
+                    fallback = .render
                 }
-            } else {
-                log.info("Using mixer recording: source transport, timing or frame coverage unavailable.")
             }
-            if !usedSource {
+            if audioPath != .source {
+                let added: Bool
                 if scaled {
                     try renderAudio(audio, offset: audioOffset, ranges: ranges, to: rendered)
-                    try await addSoundtrack(rendered, offset: 0, videoDuration: picture.timeRange.duration, to: timeline, temporaryAAC: aac)
+                    added = try await addSoundtrack(rendered, offset: 0, videoDuration: picture.timeRange.duration, to: timeline, temporaryAAC: aac)
                 } else {
-                    try await addSoundtrack(audio, offset: audioOffset, videoDuration: v.duration, to: timeline, temporaryAAC: aac)
+                    added = try await addSoundtrack(audio, offset: audioOffset, videoDuration: v.duration, to: timeline, temporaryAAC: aac)
                 }
+                if added { audioPath = .mix(fallback) }
             }
         }
         guard let mux = AVAssetExportSession(asset: timeline, presetName: AVAssetExportPresetPassthrough),
               mux.supportedFileTypes.contains(.mp4) else { throw ExportError("The camera format could not be packaged as MP4.") }
         try await mux.export(to: mp4, as: .mp4)
         try FileManager.default.moveItem(at: mp4, to: destination)
-        return size
+        log.info("\(audioPath.description, privacy: .public)")
+        let rates = speeds.isEmpty ? [] : Set(captured.map(\.rate)).sorted()
+        return Result(size: size, audioPath: audioPath, recordedRates: rates)
     }
 
     @discardableResult

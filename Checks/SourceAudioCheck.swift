@@ -150,9 +150,12 @@ enum SourceAudioCheck {
         try require(drifting.offset(videoStart: start, duration: 2) == nil, "Accepted inconsistent player clocks.")
         for restore in [false, true] {
             let out = root.appendingPathComponent("recovered-\(restore).mp4")
-            _ = try await TakeExport.save(video: mov, audio: damaged, audioOffset: 0,
-                                          speeds: restore ? [SpeedChange(host: 9, rate: rate)] : [],
-                                          videoStart: start, source: source, to: out)
+            let export = try await TakeExport.save(video: mov, audio: damaged, audioOffset: 0,
+                                                   speeds: [SpeedChange(host: 8, rate: 1.5), SpeedChange(host: 9, rate: rate),
+                                                            SpeedChange(host: 20, rate: 2)], restoreTempo: restore,
+                                                   videoStart: start, source: source, to: out)
+            try require(export.audioPath == .source, "Incorrect decoded source report.")
+            try require(export.recordedRates == [rate], "Reported rates outside the captured picture.")
             let data = try await samples(out)
             let marker = (1.55 - srcStart) / (restore ? 1 : rate)
             try require(abs(frequency(data, at: marker - 0.075) - 300) < 80 &&
@@ -167,9 +170,10 @@ enum SourceAudioCheck {
         try require(mismatched.offset(videoStart: start, duration: 2) == nil, "Accepted a changed route.")
         capture.begin(begin, stableFrom: 9)
         capture.cancel()
-        try require(capture.finish(end) == nil, "A transport change retained the source take.")
+        try require(capture.finish(end) == nil && capture.fallback == .transport, "A transport change retained the source take or lost its reason.")
         let out = root.appendingPathComponent("intentional-fallback.mp4")
-        _ = try await TakeExport.save(video: mov, audio: damaged, audioOffset: 0, videoStart: start, source: mismatched, to: out)
+        let export = try await TakeExport.save(video: mov, audio: damaged, audioOffset: 0, videoStart: start, source: mismatched, to: out)
+        try require(export.audioPath == .mix(.alignment), "Wrong reason for mixer fallback.")
         let fallback = try await samples(out)
         try require(rms(fallback, at: 0.505) < 0.055 && rms(fallback, at: 0.55) > 0.1, "Did not preserve the live mix on fallback.")
     }

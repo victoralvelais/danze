@@ -14,6 +14,14 @@ struct PlayerAnchor {
     let route: [String]
 }
 
+enum SourceFallback: String {
+    case noAnchor = "No reliable source timing at the start or end."
+    case transport = "Playback, speed or output changed during capture."
+    case writer = "Decoded source audio could not be written in full."
+    case alignment = "Source timing, speed or frame coverage did not match the video."
+    case render = "Source rendering or encoding failed."
+}
+
 final class SourceAudioFile {
     let url = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf")
     deinit { try? FileManager.default.removeItem(at: url) }
@@ -61,6 +69,7 @@ final class SourceAudioCapture {
     private var rendered: Int64 = 0
     private var historyBytes = 0
     private var take: Writer?
+    private(set) var fallback = SourceFallback.noAnchor
 
     func append(_ pcm: AVAudioPCMBuffer) {
         let block = Block(start: decoded, pcm: pcm)
@@ -90,18 +99,25 @@ final class SourceAudioCapture {
 
     func begin(_ anchor: PlayerAnchor?, stableFrom: Double) {
         cancel()
+        fallback = .noAnchor
         guard let anchor, let first = history.first else { return }
         let writer = Writer(anchor: anchor, stableFrom: stableFrom, first: first)
         writer.enqueue(history)
         take = writer
     }
 
-    func cancel() { take = nil }
+    func cancel() {
+        if take != nil { fallback = .transport }
+        take = nil
+    }
 
     func finish(_ end: PlayerAnchor?) -> SourceSoundtrack? {
-        defer { cancel() }
-        guard let end else { return nil }
-        return take?.finish(end)
+        defer { self.take = nil }
+        guard let take else { return nil }
+        guard let end else { fallback = .noAnchor; return nil }
+        let result = take.finish(end)
+        if result == nil { fallback = .writer }
+        return result
     }
 
     private final class Writer {

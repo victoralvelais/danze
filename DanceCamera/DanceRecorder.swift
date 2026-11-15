@@ -299,14 +299,18 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
                     guard let videoStart else { throw TakeError("Camera timestamps were unavailable.") }
                     offset = audio.firstAudioHostTime - videoStart
                 }
-                _ = try await TakeExport.save(video: raw, audio: audio?.url, audioOffset: offset,
-                                              speeds: restoreTempo ? audio?.speedChanges ?? [] : [],
-                                              videoStart: videoStart ?? 0, source: audio?.source, to: saved)
+                let export = try await TakeExport.save(video: raw, audio: audio?.url, audioOffset: offset,
+                                                       speeds: audio?.speedChanges ?? [], restoreTempo: restoreTempo,
+                                                       videoStart: videoStart ?? 0, source: audio?.source,
+                                                       sourceFallback: audio?.sourceFallback ?? .noAnchor, to: saved)
+                photos.writeAudioReport(export.audioPath.description, edits: audio?.mixerEdits, originalTempo: restoreTempo,
+                                        recordedRates: export.recordedRates)
                 try? FileManager.default.removeItem(at: raw)
                 message = ""
             } catch {
                 soundtrack.discardTake()
                 try FileManager.default.moveItem(at: raw, to: saved.deletingPathExtension().appendingPathExtension("mov"))
+                photos.writeAudioReport("Camera video only after soundtrack export failed.", edits: audio?.mixerEdits, originalTempo: restoreTempo)
                 message = "Camera video only. \(error.localizedDescription)"
             }
             await photos.save()

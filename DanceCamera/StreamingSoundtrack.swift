@@ -7,7 +7,9 @@ struct SoundtrackTake {
     /// Presentation of the first CAF frame, in CMClock host-clock seconds.
     let speedChanges: [SpeedChange]
     let firstAudioHostTime: TimeInterval
+    let mixerEdits: MixerEdits
     var source: SourceSoundtrack?
+    var sourceFallback = SourceFallback.noAnchor
 }
 
 @MainActor
@@ -244,6 +246,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
                 do {
                     var take = try self.tap.finish()
                     take?.source = source
+                    take?.sourceFallback = self.sourceAudio.fallback
                     continuation.resume(returning: take)
                 }
                 catch { continuation.resume(throwing: error) }
@@ -434,6 +437,7 @@ private final class MusicTap {
     private struct Block {
         let pcm: AVAudioPCMBuffer
         let host: Double
+        let stampAdjustment: Double
     }
     private let writer = DispatchQueue(label: "DanceCamera.soundtrack.write")
     private let backlog = DispatchSemaphore(value: 48)
@@ -500,9 +504,10 @@ private final class MusicTap {
         guard let pending else { return }
         self.pending = nil
         let pcm = pending.pcm
+        let prior = history.last?.pcm
         guard let host = timeline.position(pending.stamp, count: Int(pcm.frameLength), pcmRate: pcm.format.sampleRate,
-                                           followedBy: following) else { return }
-        let block = Block(pcm: pcm, host: host)
+                                           followedBy: following, distinctOverlap: { pcm.differsFromPriorOverlap(prior, frames: $0, roundingFrames: $1) }) else { return }
+        let block = Block(pcm: pcm, host: host, stampAdjustment: timeline.stampAdjustment)
         history.append(block)
         while let first = history.first, block.host - first.host > 2 { history.removeFirst() }
         if takeOpen { append(block) }
@@ -534,7 +539,8 @@ private final class MusicTap {
             if let error = writeError { clear(removing: true); throw error }
             let result: SoundtrackTake?
             if let url = destination, let recording, recording.file.length > 0 {
-                result = SoundtrackTake(url: url, speedChanges: recordedSpeeds, firstAudioHostTime: recording.origin)
+                result = SoundtrackTake(url: url, speedChanges: recordedSpeeds, firstAudioHostTime: recording.origin,
+                                       mixerEdits: recording.edits)
             } else { result = nil }
             clear(removing: result == nil)
             return result
@@ -558,7 +564,7 @@ private final class MusicTap {
                 destination = url
                 recording = try MixerRecording(url: url, format: block.pcm.format, origin: block.host)
             }
-            try recording?.append(block.pcm, host: block.host)
+            try recording?.append(block.pcm, host: block.host, stampAdjustment: block.stampAdjustment)
         } catch { writeError = error }
     }
 }

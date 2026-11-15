@@ -7,10 +7,38 @@ final class PhotoDelivery: ObservableObject {
     @Published private(set) var previousCount = 0
     @Published private(set) var delivering = false
     @Published var notice = ""
+    @Published private(set) var latestAudioReport: URL?
     let pending = URL.applicationSupportDirectory.appending(path: "Pending Photos", directoryHint: .isDirectory)
     private let previous = URL.documentsDirectory.appending(path: "Takes", directoryHint: .isDirectory)
+    private let reports = URL.documentsDirectory.appending(path: "Audio Reports", directoryHint: .isDirectory)
 
-    init() { refresh() }
+    init() {
+        refresh()
+        latestAudioReport = (try? FileManager.default.contentsOfDirectory(at: reports, includingPropertiesForKeys: nil))?
+            .filter { $0.pathExtension == "txt" }.max { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    func writeAudioReport(_ description: String, edits: MixerEdits?, originalTempo: Bool, recordedRates: [Double] = []) {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let stamp = formatter.string(from: Date())
+        let file = reports.appendingPathComponent(stamp.replacingOccurrences(of: ":", with: "-") + ".txt")
+        let info = Bundle.main.infoDictionary
+        let version = info?["CFBundleShortVersionString"] as? String ?? "?"
+        let build = info?["CFBundleVersion"] as? String ?? "?"
+        var lines = ["Dance Camera \(version) (\(build))", stamp, description,
+                     "Finish at original song tempo  " + (originalTempo ? "On" : "Off")]
+        if !recordedRates.isEmpty {
+            let rates = recordedRates.map { String(format: "%.2f×", $0) }.joined(separator: ", ")
+            lines.append("Playback rates during video  " + rates)
+        }
+        if let edits { lines.append(edits.report) }
+        do {
+            try FileManager.default.createDirectory(at: reports, withIntermediateDirectories: true)
+            try lines.joined(separator: "\n").write(to: file, atomically: true, encoding: .utf8)
+            latestAudioReport = file
+        } catch { latestAudioReport = nil }
+    }
 
     private func movies(in folder: URL) -> [URL] {
         ((try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil)) ?? [])

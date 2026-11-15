@@ -6,9 +6,10 @@ Start in **Music**. Connect to Navidrome to search songs and browse albums and p
 
 ## Recording
 
-- Leave **Finish at original song tempo** off to save the movement and music exactly as performed. The soundtrack comes from the live mixer, including pauses and speed changes. The microphone stays off.
+- Leave **Finish at original song tempo** off to save the movement and music at the speed used during the take. When the app can verify an uninterrupted song against the camera clock, it uses the decoded song. It uses the recorded mixer output for pauses, speed changes, and uncertain timing. The microphone stays off.
 - Turn that option on before recording to dance to a slowed or sped-up track and save it at the original musical tempo. The app tracks speed changes while recording, then retimes both the music and the camera frames when it saves. For example, ten seconds of dancing at 0.80× becomes eight seconds in Photos. Silent stretches normally keep their real-time duration.
 - Stop the take and allow Photos additions when iOS asks. Photos receives the completed video automatically. If access or storage prevents delivery, the app holds the video for **Retry saving to Photos**. Previous builds’ clips can be moved with the one-time migration button. Existing copies you previously saved to Photos may appear twice if you migrate them.
+- If a saved take pops or skips, tap **Share latest audio report** in Music or on the camera screen. The text file identifies the soundtrack used and counts gaps, overlaps, and corrected timestamps. Earlier reports are in the app's **Documents/Audio Reports** folder.
 - Keep AirPods connected throughout a take. Output latency correction is automatic. The camera chooses the highest supported capture preset up to 4K. Export preserves compressed camera frames and orientation.
 
 ## Music sources

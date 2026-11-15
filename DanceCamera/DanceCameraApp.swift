@@ -235,6 +235,9 @@ private struct PhotoStatus: View {
     var body: some View {
         VStack(spacing: 3) {
             if !photos.notice.isEmpty { Text(photos.notice).font(.caption) }
+            if let report = photos.latestAudioReport {
+                ShareLink("Share latest audio report", item: report).font(.caption)
+            }
             if photos.pendingCount > 0 && !photos.delivering {
                 Button("Retry saving to Photos") { Task { await photos.save() } }
             }
