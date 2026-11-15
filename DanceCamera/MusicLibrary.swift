@@ -100,15 +100,21 @@ struct MusicLibrary: View {
             NavigationStack {
                 Form {
                     TextField("Server URL", text: $account.server)
+                        .textContentType(.URL)
                         .textInputAutocapitalization(.never).autocorrectionDisabled().keyboardType(.URL)
                     Picker("Sign in with", selection: $account.useKey) {
                         Text("Account").tag(false)
                         Text("API key").tag(true)
                     }.onChange(of: account.useKey) { _, _ in account.secret = "" }
-                    if !account.useKey {
-                        TextField("Username", text: $account.username).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    if account.useKey {
+                        SecureField("API key", text: $account.secret)
+                    } else {
+                        TextField("Username", text: $account.username)
+                            .textContentType(.username)
+                            .textInputAutocapitalization(.never).autocorrectionDisabled()
+                        SecureField("Password", text: $account.secret)
+                            .textContentType(.password)
                     }
-                    SecureField(account.useKey ? "API key" : "Password", text: $account.secret)
                     Button("Connect") {
                         connecting = true
                         Task {
