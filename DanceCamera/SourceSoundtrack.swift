@@ -1,9 +1,9 @@
 import AVFoundation
 
 func connectMusicPlayer(_ node: AVAudioPlayerNode, through pitch: AVAudioUnitTimePitch,
-                        to engine: AVAudioEngine, format: AVAudioFormat, rate: Double) {
+                        to engine: AVAudioEngine, format: AVAudioFormat, rate: Double, mixer: AVAudioMixerNode? = nil) {
     engine.connect(node, to: pitch, format: format)
-    engine.connect(pitch, to: engine.mainMixerNode, format: format)
+    engine.connect(pitch, to: mixer ?? engine.mainMixerNode, format: format)
     pitch.rate = Float(rate)
 }
 

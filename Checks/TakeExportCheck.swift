@@ -362,6 +362,7 @@ struct TakeExportCheck {
         try await SourceAudioCheck.checkPlayback(mov, root)
         try await SourceAudioCheck.checkSource(mov, root)
         try await SourceAudioCheck.checkAlignment(mov, root)
+        try await PerformedAudioCheck.run(mov, root)
         try await checkExportedTone(mov, root)
         try audio(caf)
         try await checkVariableSpeed(mov, caf, root)

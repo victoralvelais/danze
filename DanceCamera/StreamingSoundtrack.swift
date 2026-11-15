@@ -2,16 +2,6 @@ import AVFoundation
 import Combine
 import Foundation
 
-struct SoundtrackTake {
-    let url: URL
-    /// Presentation of the first CAF frame, in CMClock host-clock seconds.
-    let speedChanges: [SpeedChange]
-    let firstAudioHostTime: TimeInterval
-    let mixerEdits: MixerEdits
-    var source: SourceSoundtrack?
-    var sourceFallback = SourceFallback.noAnchor
-}
-
 @MainActor
 final class StreamingSoundtrack: ObservableObject {
     enum State: Equatable { case idle, buffering, playing, paused, ended, failed(String) }
@@ -47,8 +37,9 @@ final class StreamingSoundtrack: ObservableObject {
     func setRate(_ value: Double) { player.setRate(value) }
     func pause() { player.pause() }
     func resume() { player.resume() }
-    func beginTake() throws { try player.beginTake() }
+    func beginTake(restoreTempo: Bool) throws { try player.beginTake(restoreTempo: restoreTempo) }
     func stoppingCamera() { player.stoppingCamera() }
+    func performedAudio() -> AsyncThrowingStream<PerformedAudioEvent, Error> { player.feed.samples() }
 
     func finishTake() async throws -> SoundtrackTake? { try await player.finishTake() }
     func discardTake() { player.discardTake() }
@@ -63,7 +54,8 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private let queue = DispatchQueue(label: "DanceCamera.soundtrack")
     private let graph = AVAudioEngine()
     private let node = AVAudioPlayerNode()
-    private let tap = MusicTap()
+    fileprivate let feed = PerformedAudioFeed()
+    private let bus = PerformedAudioBus()
     private let sourceAudio = SourceAudioCapture()
     private var stableFrom = Double.infinity
     private var sourceClockReliable = true
@@ -95,6 +87,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         super.init()
         graph.attach(node)
         graph.attach(pitch)
+        bus.attach(to: graph)
         configurationObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange, object: graph, queue: nil
         ) { [weak self] _ in
@@ -111,12 +104,15 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
             guard let self else { return }
             self.queue.async {
                 self.sourceAudio.cancel()
+                if self.configured { self.updateOutputDelay() }
                 if self.running { self.markSpeed(self.rate) }
             }
         }
     }
 
     deinit {
+        graph.stop()
+        feed.shutdown()
         if let configurationObserver { NotificationCenter.default.removeObserver(configurationObserver) }
         if let routeObserver { NotificationCenter.default.removeObserver(routeObserver) }
     }
@@ -136,7 +132,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private func markSpeed(_ value: Double) {
         let now = AVAudioTime.seconds(forHostTime: mach_absolute_time())
         stableFrom = now + presentationDelay
-        tap.speed(value, host: now + outputDelay + pitch.latency)
+        feed.speed(value, host: now + outputDelay + pitch.latency)
     }
 
     private var presentationDelay: Double {
@@ -231,23 +227,24 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
             if self.eof || self.bufferedSeconds >= 0.85 { self.startNode() } else { self.report(.buffering) }
         }
     }
-    func beginTake() throws {
+    func beginTake(restoreTempo: Bool) throws {
         try queue.sync {
-            try tap.begin()
+            try feed.begin()
+            guard restoreTempo else { sourceAudio.discard(); return }
             let playingRate = running && !paused && graph.isRunning && node.isPlaying ? rate : nil
             sourceAudio.begin(sourceAnchor(), stableFrom: stableFrom, playingRate: playingRate)
         }
     }
 
     func stoppingCamera() { queue.async { self.sourceAudio.stoppingCamera() } }
-    func discardTake() { queue.sync { sourceAudio.discard(); tap.discard() } }
+    func discardTake() { queue.sync { sourceAudio.discard(); feed.discard() } }
 
     func finishTake() async throws -> SoundtrackTake? {
         try await withCheckedThrowingContinuation { continuation in
             queue.async {
                 let source = self.sourceAudio.finish(self.sourceAnchor())
                 do {
-                    var take = try self.tap.finish()
+                    var take = try self.feed.finish()
                     take?.source = source
                     take?.sourceFallback = self.sourceAudio.fallback
                     continuation.resume(returning: take)
@@ -260,17 +257,20 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private func configure(_ format: AVAudioFormat) throws {
         guard !configured else { return }
         guard format.sampleRate > 0, format.channelCount > 0 else { throw TakeError("No playable audio format.") }
-        connectMusicPlayer(node, through: pitch, to: graph, format: format, rate: rate)
-        let mixed = graph.mainMixerNode.outputFormat(forBus: 0)
-        guard mixed.channelCount > 0, mixed.sampleRate > 0 else { throw TakeError("No audio output is available.") }
-        try tap.install(on: graph.mainMixerNode, format: mixed)
+        connectMusicPlayer(node, through: pitch, to: graph, format: format, rate: rate, mixer: bus.mixer)
         graph.prepare()
-        outputDelay = max(graph.mainMixerNode.outputPresentationLatency, graph.outputNode.presentationLatency,
-                          AVAudioSession.sharedInstance().outputLatency)
-        tap.setLatency(outputDelay)
+        try feed.install(on: bus.output)
+        updateOutputDelay()
         try graph.start()
+        updateOutputDelay()
         sampleRate = format.sampleRate
         configured = true
+    }
+
+    private func updateOutputDelay() {
+        outputDelay = max(bus.output.outputPresentationLatency, graph.mainMixerNode.outputPresentationLatency,
+                          graph.outputNode.presentationLatency, AVAudioSession.sharedInstance().outputLatency)
+        feed.setLatency(outputDelay)
     }
 
     private func report(_ state: State) {
@@ -296,7 +296,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         libraryReader = nil
         node.stop()
         graph.stop()
-        tap.uninstall(from: graph.mainMixerNode)
+        feed.uninstall()
         graph.disconnectNodeOutput(node)
         graph.disconnectNodeOutput(pitch)
         eof = false
@@ -360,7 +360,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
                 if last {
                     self.sourceAudio.cancel()
                     self.running = false
-                    self.tap.speed(1, host: AVAudioTime.seconds(forHostTime: mach_absolute_time()))
+                    self.feed.speed(1, host: AVAudioTime.seconds(forHostTime: mach_absolute_time()))
                     self.report(.ended)
                 } else if self.pendingFrames == 0 && !self.paused && !self.finishingTail {
                     // After a real underrun, the node clock may have advanced
@@ -430,145 +430,6 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         if let error { fail(error); return }
         do { try parser?.finish(); parser = nil; reachedEOF() }
         catch { fail(error) }
-    }
-}
-
-// The mixer runs even when the network starves or the player node pauses. Its tap
-// therefore contains the same gaps as the speaker output. Keep two seconds of
-// render history to include audio already en route to a Bluetooth device.
-private final class MusicTap {
-    private struct Block {
-        let pcm: AVAudioPCMBuffer
-        let host: Double
-        let stampAdjustment: Double
-    }
-    private let writer = DispatchQueue(label: "DanceCamera.soundtrack.write")
-    private let backlog = DispatchSemaphore(value: 48)
-    private var history: [Block] = []
-    private var epoch = UUID()
-    private var timeline = MixerTimeline()
-    private var pending: (pcm: AVAudioPCMBuffer, stamp: MixerStamp)?
-    private var speedHistory: [SpeedChange] = []
-    private var recordedSpeeds: [SpeedChange] = []
-
-    func speed(_ rate: Double, host: Double) {
-        writer.async {
-            guard self.speedHistory.last?.rate != rate else { return }
-            let event = SpeedChange(host: host, rate: rate)
-            self.speedHistory.append(event)
-            // Keep one event preceding the pre-roll window.
-            while self.speedHistory.count > 1 && self.speedHistory[1].host < host - 3 { self.speedHistory.removeFirst() }
-            if self.takeOpen { self.recordedSpeeds.append(event) }
-        }
-    }
-    private var installed = false
-    private var latency = 0.0
-    private var takeOpen = false
-    private var recording: MixerRecording?
-    private var destination: URL?
-    private var writeError: Error?
-
-    func install(on mixer: AVAudioMixerNode, format: AVAudioFormat) throws {
-        guard format.commonFormat == .pcmFormatFloat32, !format.isInterleaved else {
-            throw TakeError("The audio mixer has an unsupported output format.")
-        }
-        let id = UUID()
-        writer.sync { epoch = id; history.removeAll(); timeline = MixerTimeline(); latency = 0 }
-        mixer.installTap(onBus: 0, bufferSize: 1024, format: nil) { [weak self] buffer, time in
-            guard let self, buffer.frameLength > 0, time.isHostTimeValid || time.isSampleTimeValid else { return }
-            guard self.backlog.wait(timeout: .now()) == .success else {
-                // Do not block the render thread or create an unbounded queue. If
-                // disk I/O fell behind, fail this take instead of inventing audio.
-                self.writer.async {
-                    if self.epoch == id && self.takeOpen {
-                        self.writeError = TakeError("The iPhone could not write the soundtrack fast enough.")
-                    }
-                }
-                return
-            }
-            guard let copy = buffer.mixerCopy() else { self.backlog.signal(); return }
-            let timestamp = time.isHostTimeValid ? AVAudioTime.seconds(forHostTime: time.hostTime) : nil
-            let sample = time.isSampleTimeValid ? time.sampleTime : nil
-            let clockRate = time.isSampleTimeValid ? time.sampleRate : 0
-            self.writer.async {
-                defer { self.backlog.signal() }
-                guard self.epoch == id else { return }
-                let stamp = MixerStamp(sample: sample, clockRate: clockRate, host: timestamp.map { $0 + self.latency })
-                self.flushPending(followedBy: stamp)
-                self.pending = (copy, stamp)
-            }
-        }
-        installed = true
-    }
-
-    func setLatency(_ value: Double) { writer.sync { latency = value.isFinite ? max(0, value) : 0 } }
-
-    private func flushPending(followedBy following: MixerStamp? = nil) {
-        guard let pending else { return }
-        self.pending = nil
-        let pcm = pending.pcm
-        let prior = history.last?.pcm
-        guard let host = timeline.position(pending.stamp, count: Int(pcm.frameLength), pcmRate: pcm.format.sampleRate,
-                                           followedBy: following, distinctOverlap: { pcm.differsFromPriorOverlap(prior, frames: $0, roundingFrames: $1) }) else { return }
-        let block = Block(pcm: pcm, host: host, stampAdjustment: timeline.stampAdjustment)
-        history.append(block)
-        while let first = history.first, block.host - first.host > 2 { history.removeFirst() }
-        if takeOpen { append(block) }
-    }
-
-    func uninstall(from mixer: AVAudioMixerNode) {
-        guard installed else { return }
-        mixer.removeTap(onBus: 0)
-        installed = false
-        writer.sync { flushPending(); epoch = UUID(); history.removeAll() }
-    }
-
-    func begin() throws {
-        try writer.sync {
-            guard !takeOpen else { throw TakeError("A soundtrack is already being recorded.") }
-            takeOpen = true
-            recordedSpeeds = speedHistory
-            writeError = nil
-            for block in history { append(block) }
-            if let error = writeError { clear(removing: true); throw error }
-        }
-    }
-
-    func discard() { writer.sync { clear(removing: true) } }
-
-    func finish() throws -> SoundtrackTake? {
-        try writer.sync {
-            flushPending()
-            if let error = writeError { clear(removing: true); throw error }
-            let result: SoundtrackTake?
-            if let url = destination, let recording, recording.file.length > 0 {
-                result = SoundtrackTake(url: url, speedChanges: recordedSpeeds, firstAudioHostTime: recording.origin,
-                                       mixerEdits: recording.edits)
-            } else { result = nil }
-            clear(removing: result == nil)
-            return result
-        }
-    }
-
-    private func clear(removing: Bool) {
-        recording = nil // close and finalize the CAF header before the exporter opens it
-        if removing, let destination { try? FileManager.default.removeItem(at: destination) }
-        destination = nil
-        writeError = nil
-        takeOpen = false
-        recordedSpeeds = []
-    }
-
-    private func append(_ block: Block) {
-        guard writeError == nil else { return }
-        do {
-            if recording == nil {
-                let url = URL.temporaryDirectory.appendingPathComponent(UUID().uuidString).appendingPathExtension("caf")
-                destination = url
-                recording = try MixerRecording(url: url, format: block.pcm.format, origin: block.host)
-            }
-            try recording?.append(block.pcm, host: block.host, stampAdjustment: block.stampAdjustment)
-        } catch { writeError = error }
     }
 }
 

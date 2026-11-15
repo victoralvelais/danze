@@ -235,7 +235,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
         guard wantsCamera, phase == .idle, ready, !configuring else { return }
         guard session.isRunning else { message = "Camera unavailable. Return to the app and try again."; return }
         do {
-            try soundtrack.beginTake()
+            try soundtrack.beginTake(restoreTempo: originalTempo)
             let raw = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension("mov")
             takeURL = raw
             videoStart = nil

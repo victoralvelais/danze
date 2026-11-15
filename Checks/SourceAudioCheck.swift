@@ -7,7 +7,7 @@ enum SourceAudioCheck {
     }
 
     // Decode the exported AAC against its actual presentation timestamps.
-    private static func samples(_ url: URL) async throws -> [Float] {
+    static func samples(_ url: URL) async throws -> [Float] {
         let asset = AVURLAsset(url: url)
         guard let track = try await asset.loadTracks(withMediaType: .audio).first else { throw TakeError("Missing output audio.") }
         let reader = try AVAssetReader(asset: asset)
@@ -154,9 +154,14 @@ enum SourceAudioCheck {
                                                    speeds: [SpeedChange(host: 8, rate: 1.5), SpeedChange(host: 9, rate: rate),
                                                             SpeedChange(host: 20, rate: 2)], restoreTempo: restore,
                                                    videoStart: start, source: source, to: out)
-            try require(export.audioPath == .source, "Incorrect decoded source report.")
+            try require(export.audioPath == (restore ? .source : .performed), "Incorrect performed/source report.")
             try require(export.recordedRates == [rate], "Reported rates outside the captured picture.")
             let data = try await samples(out)
+            if !restore {
+                try require(rms(data, at: 0.505) < 0.055 && rms(data, at: 0.55) > 0.1,
+                            "Performed mode substituted the decoded original for what was played.")
+                continue
+            }
             let marker = (1.55 - srcStart) / (restore ? 1 : rate)
             try require(abs(frequency(data, at: marker - 0.075) - 300) < 80 &&
                         abs(frequency(data, at: marker + 0.05) - 900) < 90, "Source marker lost sync or pitch.")
@@ -239,14 +244,17 @@ enum SourceAudioCheck {
             let export = try await TakeExport.save(video: mov, audio: mix, audioOffset: -mixStart,
                                                   speeds: [SpeedChange(host: 9, rate: rate)], restoreTempo: restore,
                                                   videoStart: 10, source: song, appVersion: "0.1.2", to: target)
-            try require(export.audioPath == .matchedSource, "A recoverable soundtrack fell back to damaged mixer audio.")
+            try require(export.audioPath == (restore ? .matchedSource : .performed), "Incorrect path for the chosen tempo mode.")
             let decoded = try await samples(target)
             let scale = restore ? rate : 1
             try require(abs(Double(decoded.count) / hz - 2 * scale) < 0.06, "Matched export changed movie tempo.")
             let time = heardMarker * scale
             try require(abs(frequency(decoded, at: time - 0.10) - 330) < 80 &&
                         abs(frequency(decoded, at: time + 0.10) - 770) < 80, "Matched AAC lost its timing or pitch.")
-            for t in holes { try require(rms(decoded, at: (t + 0.01) * scale) > 0.012, "Damaged mix survived matched export.") }
+            for t in holes {
+                let level = rms(decoded, at: (t + 0.01) * scale)
+                try require(restore ? level > 0.012 : level < 0.025, "The selected path did not preserve its expected soundtrack.")
+            }
             let asset = AVURLAsset(url: target)
             let formats = try await asset.load(.availableMetadataFormats)
             var descriptions = [String](), identifiers = [String]()

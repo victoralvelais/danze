@@ -9,10 +9,11 @@ struct TakeError: LocalizedError {
 enum TakeExport {
     private static let log = Logger(subsystem: "dev.codexxp.dancecamera", category: "soundtrack")
     enum AudioPath: Equatable {
-        case none, source, matchedSource, mix(SourceFallback)
+        case none, performed, source, matchedSource, mix(SourceFallback)
         var description: String {
             switch self {
             case .none: return "Camera video without a soundtrack."
+            case .performed: return "Live performed audio."
             case .source: return "Decoded song audio. Verified by player timing."
             case .matchedSource: return "Decoded song audio. Verified against the recorded music."
             case .mix(let reason): return "Captured mixer audio. " + reason.rawValue
@@ -56,7 +57,11 @@ enum TakeExport {
         defer { try? FileManager.default.removeItem(at: rendered) }
         if scaled { retime(picture, using: ranges) }
         var audioPath = AudioPath.none
-        if let audio {
+        if let audio, !restoreTempo {
+            if try await addSoundtrack(audio, offset: audioOffset, videoDuration: v.duration, to: timeline, temporaryAAC: aac) {
+                audioPath = .performed
+            }
+        } else if let audio {
             var fallback = source == nil ? sourceFallback : .alignment
             var sourceStart = source?.offset(videoStart: videoStart, duration: v.duration.seconds)
             var sourcePath = AudioPath.source
@@ -66,17 +71,9 @@ enum TakeExport {
                                                              duration: v.duration.seconds, rate: source.rate)
                 sourcePath = .matchedSource
             }
-            if let source, let start = sourceStart,
-               !scaled || ranges.allSatisfy({ abs($0.rate - source.rate) < 0.0001 }) {
+            if let source, let start = sourceStart, captured.allSatisfy({ abs($0.rate - source.rate) < 0.0001 }) {
                 do {
-                    var url = source.file.url, offset = -start
-                    if !scaled && source.rate != 1 {
-                        let range = TakeSpeedRange(start: 0, end: v.duration.seconds * source.rate, rate: 1 / source.rate)
-                        try renderAudio(url, offset: offset, ranges: [range], to: rendered)
-                        url = rendered
-                        offset = 0
-                    }
-                    guard try await addSoundtrack(url, offset: offset, videoDuration: picture.timeRange.duration,
+                    guard try await addSoundtrack(source.file.url, offset: -start, videoDuration: picture.timeRange.duration,
                                                   to: timeline, temporaryAAC: aac) else {
                         throw ExportError("The source recording does not span the take.")
                     }

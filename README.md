@@ -6,10 +6,11 @@ Start in **Music**. Connect to Navidrome to search songs and browse albums and p
 
 ## Recording
 
-- Leave **Finish at original song tempo** off to save the movement and music at the speed used during the take. For an uninterrupted take at one speed, the app uses the decoded song when it can verify its timing against the camera clock or match the recorded music to the original at several points. It uses the recorded mixer output for pauses, speed changes, and uncertain timing. The microphone stays off.
-- Turn that option on before recording to dance to a slowed or sped-up track and save it at the original musical tempo. The app tracks speed changes while recording, then retimes both the music and the camera frames when it saves. For example, ten seconds of dancing at 0.80× becomes eight seconds in Photos. Silent stretches normally keep their real-time duration.
+- Leave **Finish at original song tempo** off to save the camera and the music at the speed you performed. The audio comes from the same stream of samples that the player sends toward the speaker or headphones. The microphone stays off.
+- Turn that option on before recording to save the dance at the original musical tempo. For example, ten seconds at 0.80× becomes eight seconds in Photos. For an uninterrupted song at one speed, the app uses the original music when timing or a content match establishes its position. With song or speed changes it retimes the recorded mix in sections.
 - Stop the take and allow Photos additions when iOS asks. Photos receives the completed video automatically. If access or storage prevents delivery, the app holds the video for **Retry saving to Photos**. Previous builds’ clips can be moved with the one-time migration button. Existing copies you previously saved to Photos may appear twice if you migrate them.
 - If a saved take pops or skips, tap **Share latest audio report** in Music or on the camera screen. The text file identifies the soundtrack used and counts gaps, overlaps, and corrected timestamps. Earlier reports are in the app's **Documents/Audio Reports** folder.
+- The MP4 description **Live performed audio** identifies a take saved at the playback speed you heard. **Decoded song audio** identifies a take assembled from the original song. **Captured mixer audio** identifies a restored take that used the performance recording.
 - Keep AirPods connected throughout a take. Output latency correction is automatic. The camera chooses the highest supported capture preset up to 4K. Export preserves compressed camera frames and orientation.
 
 ## Music sources
