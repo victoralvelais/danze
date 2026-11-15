@@ -5,6 +5,18 @@ import MediaPlayer
 
 enum TakePhase { case idle, starting, recording, saving }
 
+extension AVCaptureConnection {
+    func setPortraitVideo(mirrored: Bool) {
+        // The studio is portrait-only. Let AVFoundation map portrait to the
+        // attached sensor, including front cameras with a different mounting angle.
+        if isVideoOrientationSupported && videoOrientation != .portrait { videoOrientation = .portrait }
+        if isVideoMirroringSupported {
+            if automaticallyAdjustsVideoMirroring { automaticallyAdjustsVideoMirroring = false }
+            if isVideoMirrored != mirrored { isVideoMirrored = mirrored }
+        }
+    }
+}
+
 @MainActor
 final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecordingDelegate {
     @Published var message = ""
@@ -19,7 +31,9 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     private let movie = AVCaptureMovieFileOutput()
     private let sessionQueue = DispatchQueue(label: "camera.session")
     private var wantsCamera = false
-    private var configuring = false
+    @Published private(set) var configuring = false
+    @Published private(set) var position: AVCaptureDevice.Position = .back
+    @Published private(set) var hasOtherCamera = false
     private enum Source { case stream(URLRequest, String), file(URL, String), library(URL, String) }
     private var current: Source?
     private var currentKey = ""
@@ -32,56 +46,114 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     func configure() async {
         wantsCamera = true
         guard !ready, !configuring else { return }
+        await updateCamera(to: nil)
+    }
+
+    func switchCamera() async {
+        guard wantsCamera, ready, hasOtherCamera, phase == .idle, !configuring else { return }
+        await updateCamera(to: position == .back ? .front : .back)
+    }
+
+    private func updateCamera(to requested: AVCaptureDevice.Position?) async {
+        guard !configuring, requested == nil || (wantsCamera && ready && phase == .idle) else { return }
         configuring = true
-        defer { configuring = false }
-        guard await AVCaptureDevice.requestAccess(for: .video) else {
-            message = "Allow camera access in Settings to record a take."
-            return
+        defer {
+            configuring = false
+            if !wantsCamera { releaseCamera() }
+        }
+        if requested == nil {
+            guard await AVCaptureDevice.requestAccess(for: .video) else {
+                message = "Allow camera access in Settings to record a take."
+                return
+            }
         }
         guard wantsCamera else { return }
         let capture = session, output = movie
-        do {
-            try await withCheckedThrowingContinuation { (done: CheckedContinuation<Void, Error>) in
-                sessionQueue.async {
-                    do {
-                        if capture.inputs.isEmpty {
-                            guard let camera = AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: .back)
-                            else { throw TakeError("No rear camera available.") }
-                            let input = try AVCaptureDeviceInput(device: camera)
-                            capture.beginConfiguration()
-                            defer { capture.commitConfiguration() }
-                            capture.automaticallyConfiguresApplicationAudioSession = false
-                            guard capture.canAddInput(input) else { throw TakeError("Camera input is unavailable.") }
-                            capture.addInput(input)
-                            guard capture.canAddOutput(output) else {
-                                capture.removeInput(input)
-                                throw TakeError("Video output is unavailable.")
-                            }
-                            capture.addOutput(output)
-                            let presets: [AVCaptureSession.Preset] = [.hd4K3840x2160, .hd1920x1080, .hd1280x720, .high]
-                            if let best = presets.first(where: { capture.canSetSessionPreset($0) }) { capture.sessionPreset = best }
-                            if let connection = output.connection(with: .video) {
-                                if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
-                                if output.availableVideoCodecTypes.contains(.hevc) {
-                                    output.setOutputSettings([AVVideoCodecKey: AVVideoCodecType.hevc], for: connection)
-                                }
-                            }
-                        }
-                        capture.startRunning()
-                        guard capture.isRunning else { throw TakeError("The camera could not start.") }
-                        done.resume()
-                    } catch { done.resume(throwing: error) }
-                }
+        let state: (position: AVCaptureDevice.Position?, ready: Bool, other: Bool, issue: String?) = await withCheckedContinuation { done in
+            sessionQueue.async {
+                var issue: String?
+                do {
+                    try Self.installCamera(on: capture, output: output, requested: requested)
+                    if !capture.isRunning { capture.startRunning() }
+                    if !capture.isRunning { throw TakeError("The camera could not start.") }
+                } catch { issue = error.localizedDescription }
+                let active = Self.videoInput(in: capture)?.device.position
+                let other = active.map { Self.wideCamera(at: $0 == .back ? .front : .back) != nil } ?? false
+                let usable = capture.isRunning && active != nil && output.connection(with: .video) != nil
+                done.resume(returning: (active, usable, other, issue))
             }
-            ready = wantsCamera
-            if ready { message = "" } else { releaseCamera() }
-        } catch { message = error.localizedDescription }
+        }
+        if let active = state.position { position = active }
+        hasOtherCamera = state.other
+        ready = wantsCamera && state.ready
+        message = state.issue ?? ""
+    }
+
+    nonisolated private static func wideCamera(at position: AVCaptureDevice.Position) -> AVCaptureDevice? {
+        AVCaptureDevice.default(.builtInWideAngleCamera, for: .video, position: position)
+    }
+
+    nonisolated private static func videoInput(in capture: AVCaptureSession) -> AVCaptureDeviceInput? {
+        capture.inputs.compactMap { $0 as? AVCaptureDeviceInput }.first { $0.device.hasMediaType(.video) }
+    }
+
+    // Runs on sessionQueue. Replacing the video input preserves the movie output
+    // and the separate music playback graph between takes.
+    nonisolated private static func installCamera(on capture: AVCaptureSession, output: AVCaptureMovieFileOutput,
+                                                 requested: AVCaptureDevice.Position?) throws {
+        let previous = videoInput(in: capture)
+        if requested == nil, previous != nil, output.connection(with: .video) != nil { return }
+        let device: AVCaptureDevice?
+        if let requested { device = wideCamera(at: requested) }
+        else { device = previous?.device ?? wideCamera(at: .back) ?? wideCamera(at: .front) }
+        guard let device else { throw TakeError("The requested camera is unavailable.") }
+        let input = try AVCaptureDeviceInput(device: device)
+        let oldPreset = capture.sessionPreset
+        let hadOutput = capture.outputs.contains { $0 === output }
+        capture.beginConfiguration()
+        defer { capture.commitConfiguration() }
+        capture.automaticallyConfiguresApplicationAudioSession = false
+        // The previous lens may support a higher preset than the new lens.
+        if capture.canSetSessionPreset(.high) { capture.sessionPreset = .high }
+        if let previous { capture.removeInput(previous) }
+        do {
+            guard capture.canAddInput(input) else { throw TakeError("Could not use that camera.") }
+            capture.addInput(input)
+            if !hadOutput {
+                guard capture.canAddOutput(output) else { throw TakeError("Video output is unavailable.") }
+                capture.addOutput(output)
+            }
+            let presets: [AVCaptureSession.Preset] = [.hd4K3840x2160, .hd1920x1080, .hd1280x720, .high]
+            if let best = presets.first(where: { capture.canSetSessionPreset($0) }) { capture.sessionPreset = best }
+            try configureMovieConnection(output)
+        } catch {
+            if !hadOutput && capture.outputs.contains(where: { $0 === output }) { capture.removeOutput(output) }
+            if capture.inputs.contains(where: { $0 === input }) { capture.removeInput(input) }
+            if let previous {
+                if capture.canSetSessionPreset(.high) { capture.sessionPreset = .high }
+                guard capture.canAddInput(previous) else { throw TakeError("Camera unavailable. Reopen Dance camera to retry.") }
+                capture.addInput(previous)
+                if capture.canSetSessionPreset(oldPreset) { capture.sessionPreset = oldPreset }
+                if hadOutput { try configureMovieConnection(output) }
+            }
+            throw error
+        }
+    }
+
+    nonisolated private static func configureMovieConnection(_ output: AVCaptureMovieFileOutput) throws {
+        guard let connection = output.connection(with: .video) else { throw TakeError("Video connection is unavailable.") }
+        connection.setPortraitVideo(mirrored: false)
+        let codecs: [AVVideoCodecType] = [.hevc, .h264]
+        if let codec = codecs.first(where: { output.availableVideoCodecTypes.contains($0) }) {
+            output.setOutputSettings([AVVideoCodecKey: codec], for: connection)
+        }
     }
 
     func releaseCamera() {
         wantsCamera = false
         guard phase == .idle else { return }
         ready = false
+        guard !configuring else { return } // The in-flight update reconciles wantsCamera before releasing.
         let capture = session
         sessionQueue.async { if capture.isRunning { capture.stopRunning() } }
     }
@@ -160,7 +232,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     }
 
     func record() {
-        guard phase == .idle, ready else { return }
+        guard wantsCamera, phase == .idle, ready, !configuring else { return }
         guard session.isRunning else { message = "Camera unavailable. Return to the app and try again."; return }
         do {
             try soundtrack.beginTake()

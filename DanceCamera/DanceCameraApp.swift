@@ -16,17 +16,19 @@ private final class CameraCanvas: UIView {
 
 private struct Preview: UIViewRepresentable {
     let session: AVCaptureSession
+    let position: AVCaptureDevice.Position
+    let configuring: Bool
     func makeUIView(context: Context) -> CameraCanvas {
         let view = CameraCanvas()
         view.preview.videoGravity = .resizeAspectFill
         view.preview.session = session
-        if let connection = view.preview.connection, connection.isVideoRotationAngleSupported(90) {
-            connection.videoRotationAngle = 90
-        }
         return view
     }
 
-    func updateUIView(_ uiView: CameraCanvas, context: Context) {}
+    func updateUIView(_ uiView: CameraCanvas, context: Context) {
+        guard !configuring else { return }
+        uiView.preview.connection?.setPortraitVideo(mirrored: position == .front)
+    }
 }
 
 struct DanceCameraView: View {
@@ -68,7 +70,7 @@ struct DanceCameraView: View {
             catch { if (error as NSError).code != NSUserCancelledError { libraryMessage = error.localizedDescription } }
         }
         .onChange(of: scene) { _, phase in
-            if phase == .background, cameraOpen { camera.interrupt() }
+            if phase == .background, cameraOpen { camera.interrupt(); camera.releaseCamera() }
             if phase == .active, cameraOpen { Task { await camera.configure() } }
         }
         .onReceive(camera.soundtrack.$state.removeDuplicates()) { if $0 == .ended { camera.playNext() } }
@@ -122,6 +124,8 @@ private struct SystemMusicPicker: UIViewControllerRepresentable {
 private struct CameraStudio: View {
     @ObservedObject var camera: DanceRecorder
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.scenePhase) private var scene
+    @State private var previousIdleTimer: Bool?
     var body: some View {
         VStack(spacing: 12) {
             HStack {
@@ -129,26 +133,67 @@ private struct CameraStudio: View {
                     .disabled(camera.phase != .idle)
                 Spacer()
                 if camera.phase == .recording { Label("Recording", systemImage: "record.circle").foregroundStyle(.red) }
+                if camera.hasOtherCamera {
+                    Button { Task { await camera.switchCamera() } } label: {
+                        Image(systemName: "camera.rotate").frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel(camera.position == .back ? "Switch to front camera" : "Switch to rear camera")
+                    .disabled(!camera.ready || camera.configuring || camera.phase != .idle)
+                }
             }
             ZStack {
                 Color.black
-                if camera.ready { Preview(session: camera.session) }
+                if camera.ready { Preview(session: camera.session, position: camera.position, configuring: camera.configuring) }
             }.clipShape(RoundedRectangle(cornerRadius: 14))
             PlayerControls(camera: camera, music: camera.soundtrack)
             Toggle("Finish at original song tempo", isOn: $camera.originalTempo)
                 .font(.subheadline).disabled(camera.phase != .idle)
             if !camera.message.isEmpty { Text(camera.message).font(.caption) }
             PhotoStatus(photos: camera.photos)
-            if camera.phase == .starting || camera.phase == .recording {
-                Button("Stop and save") { camera.stop() }.buttonStyle(.borderedProminent).tint(.red)
-            } else {
-                Button(camera.phase == .saving ? "Saving…" : "Record take") { camera.record() }
-                    .buttonStyle(.borderedProminent).disabled(!camera.ready || camera.phase != .idle)
-            }
+            shutter
         }
         .padding()
         .interactiveDismissDisabled(camera.phase != .idle)
-        .task { await camera.configure() }
+        .task { if scene == .active { await camera.configure() } }
+        .onChange(of: scene, initial: true) { _, phase in setScreenAwake(phase == .active) }
+        .onDisappear { setScreenAwake(false) }
+    }
+
+    private var shutter: some View {
+        let canStop = camera.phase == .starting || camera.phase == .recording
+        let saving = camera.phase == .saving
+        return Button {
+            if canStop { camera.stop() } else { camera.record() }
+        } label: {
+            ZStack {
+                Circle().fill(.black)
+                Circle().strokeBorder(.white, lineWidth: 3)
+                if saving {
+                    ProgressView().tint(.white)
+                } else if canStop {
+                    RoundedRectangle(cornerRadius: 5).fill(.red).frame(width: 30, height: 30)
+                } else {
+                    Circle().fill(.red).padding(7)
+                }
+            }
+            .frame(width: 70, height: 70)
+            .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!canStop && (!camera.ready || camera.configuring || saving))
+        .accessibilityLabel(saving ? "Saving take" : canStop ? "Stop and save take" : "Record take")
+    }
+
+    private func setScreenAwake(_ awake: Bool) {
+        let application = UIApplication.shared
+        if awake {
+            guard previousIdleTimer == nil else { return }
+            previousIdleTimer = application.isIdleTimerDisabled
+            application.isIdleTimerDisabled = true
+        } else if let previousIdleTimer {
+            application.isIdleTimerDisabled = previousIdleTimer
+            self.previousIdleTimer = nil
+        }
     }
 }
 

@@ -191,7 +191,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = DanceCamera/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Dance Camera";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Record a dance take using the rear camera.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Record a dance take using the front or rear camera.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
@@ -211,7 +211,7 @@
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = DanceCamera/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "Dance Camera";
-				INFOPLIST_KEY_NSCameraUsageDescription = "Record a dance take using the rear camera.";
+				INFOPLIST_KEY_NSCameraUsageDescription = "Record a dance take using the front or rear camera.";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations_iPhone = UIInterfaceOrientationPortrait;
