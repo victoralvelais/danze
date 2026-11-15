@@ -247,10 +247,18 @@ enum SourceAudioCheck {
             try require(abs(frequency(decoded, at: time - 0.10) - 330) < 80 &&
                         abs(frequency(decoded, at: time + 0.10) - 770) < 80, "Matched AAC lost its timing or pitch.")
             for t in holes { try require(rms(decoded, at: (t + 0.01) * scale) > 0.012, "Damaged mix survived matched export.") }
-            let metadata = try await AVURLAsset(url: target).load(.metadata)
-            let comments = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .iTunesMetadataUserComment)
-            let comment = try await comments.first?.load(.stringValue)
-            try require(comment == "Dance Camera 0.1.2. " + export.audioPath.description, "Missing soundtrack report in the exported MP4.")
+            let asset = AVURLAsset(url: target)
+            let formats = try await asset.load(.availableMetadataFormats)
+            var descriptions = [String](), identifiers = [String]()
+            for format in formats {
+                for item in try await asset.loadMetadata(for: format) {
+                    if let id = item.identifier { identifiers.append(id.rawValue) }
+                    if item.identifier == .identifier3GPUserDataDescription || item.commonKey == .commonKeyDescription,
+                       let value = try await item.load(.stringValue) { descriptions.append(value) }
+                }
+            }
+            try require(descriptions.contains("Dance Camera 0.1.2. " + export.audioPath.description),
+                        "Missing soundtrack description in exported MP4. Formats \(formats), identifiers \(identifiers).")
         }
         let silence = try write(Array(repeating: 0, count: baseline.count), named: "no-audio-to-match")
         try require(try offset(song.file.url, silence) == nil, "Silent audio admitted a source match.")

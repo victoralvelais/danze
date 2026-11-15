@@ -102,7 +102,9 @@ enum TakeExport {
         guard let mux = AVAssetExportSession(asset: timeline, presetName: AVAssetExportPresetPassthrough),
               mux.supportedFileTypes.contains(.mp4) else { throw ExportError("The camera format could not be packaged as MP4.") }
         let note = AVMutableMetadataItem()
-        note.identifier = .iTunesMetadataUserComment
+        // MP4 clip metadata uses the 3GPP user-data description ('dscp') and language.
+        note.identifier = .identifier3GPUserDataDescription
+        note.extendedLanguageTag = "en"
         let app = ["Dance Camera", appVersion].compactMap { $0 }.joined(separator: " ")
         note.value = (app + ". " + audioPath.description) as NSString
         note.dataType = kCMMetadataBaseDataType_UTF8 as String
