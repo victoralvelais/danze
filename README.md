@@ -13,6 +13,12 @@ Start in **Music**. Connect to Navidrome to search songs and browse albums and p
 - The MP4 description **Live performed audio** identifies a take saved at the playback speed you heard. **Decoded song audio** identifies a take assembled from the original song. **Captured mixer audio** identifies a restored take that used the performance recording.
 - Keep AirPods connected throughout a take. Output latency correction is automatic. The camera chooses the highest supported capture preset up to 4K. Export preserves compressed camera frames and orientation.
 
+## TikTok LIVE on iPhone
+
+Choose your song, dance tempo and lens in Dance Camera. In TikTok, open **+ → LIVE → Mobile gaming**. Turn the broadcast microphone off to hear the app music on its own. Start screen sharing when you are ready for TikTok to broadcast, then switch back to Dance Camera. [iPhone screen sharing on TikTok](https://apps.apple.com/id/iphone/story/id1853849325)
+
+Open **Dance camera → LIVE**, resume the music if needed, and choose **Show clean camera**. The audience sees the whole portrait camera frame. Tap the picture to return to the controls. End the LIVE in TikTok. To rehearse privately, use the iPhone’s **Screen Recording** in Control Center and review the result in Photos. For the first TikTok test, listen on a second device to check that the music comes through with AirPods connected.
+
 ## Music sources
 
 For the iPhone Music library, select a downloaded track with an unprotected audio asset, such as an eligible synced file or purchase. The picker can report media access as unavailable under a host without Music permission. Apple Music subscription recordings are protected. Navidrome and local audio support the complete playback and recording workflow. [Apple media item asset URLs](https://developer.apple.com/documentation/mediaplayer/mpmediaitem/asseturl) · [Protected media assets](https://developer.apple.com/documentation/mediaplayer/mpmediaitem/hasprotectedasset)

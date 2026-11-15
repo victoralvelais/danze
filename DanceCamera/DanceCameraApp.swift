@@ -18,17 +18,20 @@ private struct Preview: UIViewRepresentable {
     let session: AVCaptureSession
     let position: AVCaptureDevice.Position
     let configuring: Bool
+    var audienceView = false
     func makeUIView(context: Context) -> CameraCanvas {
         let view = CameraCanvas()
-        view.preview.videoGravity = .resizeAspectFill
+        view.preview.videoGravity = audienceView ? .resizeAspect : .resizeAspectFill
         view.preview.session = session
         return view
     }
 
     func updateUIView(_ uiView: CameraCanvas, context: Context) {
         guard !configuring else { return }
-        uiView.preview.connection?.setPortraitVideo(mirrored: position == .front)
+        uiView.preview.connection?.setPortraitVideo(mirrored: !audienceView && position == .front)
     }
+
+    static func dismantleUIView(_ uiView: CameraCanvas, coordinator: ()) { uiView.preview.session = nil }
 }
 
 struct DanceCameraView: View {
@@ -126,13 +129,64 @@ private struct CameraStudio: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scene
     @State private var previousIdleTimer: Bool?
+    @State private var liveSetup = false
+    @State private var cleanCamera = false
+
     var body: some View {
+        Group {
+            if cleanCamera {
+                ZStack {
+                    Color.black
+                    if camera.ready {
+                        Preview(session: camera.session, position: camera.position, configuring: camera.configuring, audienceView: true)
+                    } else if !camera.message.isEmpty {
+                        Text(camera.message).foregroundStyle(.white).padding()
+                    }
+                }
+                .ignoresSafeArea()
+                .contentShape(Rectangle())
+                .onTapGesture { cleanCamera = false }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Show camera controls")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityAction { cleanCamera = false }
+                .accessibilityAction(.escape) { cleanCamera = false }
+            } else {
+                studio
+            }
+        }
+        .statusBarHidden(cleanCamera)
+        .persistentSystemOverlays(cleanCamera ? .hidden : .automatic)
+        .sheet(isPresented: $liveSetup) {
+            TikTokLiveSetup(camera: camera, onShowCleanCamera: {
+                liveSetup = false
+                cleanCamera = true
+            })
+        }
+        .interactiveDismissDisabled(camera.phase != .idle || cleanCamera)
+        .task { if scene == .active { await camera.configure() } }
+        .onChange(of: scene, initial: true) { _, phase in
+            setScreenAwake(phase == .active)
+            if phase == .background && cleanCamera {
+                // TikTok setup temporarily takes the camera and can pause the music.
+                // On return, let the performer resume before hiding the controls.
+                cleanCamera = false
+                liveSetup = true
+            }
+        }
+        .onDisappear { setScreenAwake(false) }
+    }
+
+    private var studio: some View {
         VStack(spacing: 12) {
             HStack {
                 Button { dismiss() } label: { Label("Music", systemImage: "chevron.left") }
                     .disabled(camera.phase != .idle)
                 Spacer()
                 if camera.phase == .recording { Label("Recording", systemImage: "record.circle").foregroundStyle(.red) }
+                Button { liveSetup = true } label: { Label("LIVE", systemImage: "dot.radiowaves.left.and.right") }
+                    .disabled(camera.phase != .idle)
+                    .accessibilityLabel("TikTok LIVE setup")
                 if camera.hasOtherCamera {
                     Button { Task { await camera.switchCamera() } } label: {
                         Image(systemName: "camera.rotate").frame(width: 44, height: 44)
@@ -153,10 +207,6 @@ private struct CameraStudio: View {
             shutter
         }
         .padding()
-        .interactiveDismissDisabled(camera.phase != .idle)
-        .task { if scene == .active { await camera.configure() } }
-        .onChange(of: scene, initial: true) { _, phase in setScreenAwake(phase == .active) }
-        .onDisappear { setScreenAwake(false) }
     }
 
     private var shutter: some View {

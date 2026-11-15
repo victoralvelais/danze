@@ -55,6 +55,31 @@ jobs:
           xcrun swiftc -O -target "$(uname -m)-apple-macos15.0" DanceCamera/TakeExport.swift DanceCamera/AudioTiming.swift DanceCamera/SourceSoundtrack.swift DanceCamera/SoundtrackAlignment.swift DanceCamera/PerformedAudioFeed.swift DanceCamera/IncrementalDecoder.swift Checks/TakeExportCheck.swift Checks/SourceAudioCheck.swift Checks/PerformedAudioCheck.swift -o "$RUNNER_TEMP/check-takes"
           "$RUNNER_TEMP/check-takes"
 
+      - name: Rehearse TikTok screen sharing in the iPhone simulator
+        shell: bash
+        run: |
+          set -euo pipefail
+          device=$(xcrun simctl list devices available -j | python3 -c '
+          import json, sys
+          devices = json.load(sys.stdin)["devices"]
+          iOS = (key for key in devices if ".iOS-" in key)
+          for runtime in sorted(iOS, key=lambda s: tuple(map(int, s.split(".iOS-")[1].split("-"))), reverse=True):
+              phones = [d for d in devices[runtime] if d["name"].startswith("iPhone")]
+              if phones:
+                  print(phones[0]["udid"])
+                  break
+          else:
+              sys.exit("No available iPhone simulator")
+          ')
+          xcrun simctl bootstatus "$device" -b
+          settings=(-project "$APP.xcodeproj" -scheme DanceCameraScreenTests -configuration Debug
+                    -destination "platform=iOS Simulator,id=$device" -derivedDataPath "$RUNNER_TEMP/simulator"
+                    -parallel-testing-enabled NO)
+          xcodebuild "${settings[@]}" build-for-testing
+          xcrun simctl install "$device" "$RUNNER_TEMP/simulator/Build/Products/Debug-iphonesimulator/$APP.app"
+          xcrun simctl privacy "$device" grant camera dev.codexxp.dancecamera
+          xcodebuild "${settings[@]}" test-without-building
+
       - name: Package and verify IPA
         id: package
         env:

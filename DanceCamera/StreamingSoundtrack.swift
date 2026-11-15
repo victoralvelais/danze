@@ -219,6 +219,14 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     func resume() {
         queue.async {
             guard self.paused else { return }
+            // TikTok or a system interruption can deactivate the playback session
+            // while the dance camera is in the background. Resume is user-initiated.
+            do {
+                try AVAudioSession.sharedInstance().setActive(true)
+                if self.configured && !self.graph.isRunning {
+                    throw TakeError("The audio route changed. Choose Play music to restart the song.")
+                }
+            } catch { self.fail(error); return }
             self.paused = false
             if self.suspended && (self.bufferedSeconds < 5) {
                 self.network?.resume()
