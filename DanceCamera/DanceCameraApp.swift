@@ -18,17 +18,16 @@ private struct Preview: UIViewRepresentable {
     let session: AVCaptureSession
     let position: AVCaptureDevice.Position
     let configuring: Bool
-    var audienceView = false
     func makeUIView(context: Context) -> CameraCanvas {
         let view = CameraCanvas()
-        view.preview.videoGravity = audienceView ? .resizeAspect : .resizeAspectFill
+        view.preview.videoGravity = .resizeAspectFill
         view.preview.session = session
         return view
     }
 
     func updateUIView(_ uiView: CameraCanvas, context: Context) {
         guard !configuring else { return }
-        uiView.preview.connection?.setPortraitVideo(mirrored: !audienceView && position == .front)
+        uiView.preview.connection?.setPortraitVideo(mirrored: position == .front)
     }
 
     static func dismantleUIView(_ uiView: CameraCanvas, coordinator: ()) { uiView.preview.session = nil }
@@ -137,10 +136,9 @@ private struct CameraStudio: View {
             if cleanCamera {
                 ZStack {
                     Color.black
-                    if camera.ready {
-                        Preview(session: camera.session, position: camera.position, configuring: camera.configuring, audienceView: true)
-                    } else if !camera.message.isEmpty {
-                        Text(camera.message).foregroundStyle(.white).padding()
+                    CleanCameraSurface(camera: camera)
+                    if let problem = camera.cleanIssue ?? (!camera.ready && !camera.message.isEmpty ? camera.message : nil) {
+                        Text(problem).foregroundStyle(.white).padding()
                     }
                 }
                 .ignoresSafeArea()

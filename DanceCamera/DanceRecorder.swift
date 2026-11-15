@@ -22,6 +22,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     @Published var message = ""
     @Published private(set) var phase = TakePhase.idle
     @Published private(set) var ready = false
+    @Published private(set) var cleanIssue: String?
     @Published private(set) var upcoming: [String] = []
     @Published private(set) var speed = 1.0
     @Published var originalTempo = false
@@ -31,6 +32,8 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     private let movie = AVCaptureMovieFileOutput()
     private let sessionQueue = DispatchQueue(label: "camera.session")
     private var wantsCamera = false
+    private var cleanFrames: CleanCameraFrames?
+    private var restoringCleanFrames = false
     @Published private(set) var configuring = false
     @Published private(set) var position: AVCaptureDevice.Position = .back
     @Published private(set) var hasOtherCamera = false
@@ -45,12 +48,12 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
 
     func configure() async {
         wantsCamera = true
-        guard !ready, !configuring else { return }
+        guard !ready, !configuring, cleanFrames == nil, !restoringCleanFrames else { return }
         await updateCamera(to: nil)
     }
 
     func switchCamera() async {
-        guard wantsCamera, ready, hasOtherCamera, phase == .idle, !configuring else { return }
+        guard wantsCamera, ready, hasOtherCamera, phase == .idle, !configuring, cleanFrames == nil, !restoringCleanFrames else { return }
         await updateCamera(to: position == .back ? .front : .back)
     }
 
@@ -140,7 +143,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
         }
     }
 
-    nonisolated private static func configureMovieConnection(_ output: AVCaptureMovieFileOutput) throws {
+    nonisolated static func configureMovieConnection(_ output: AVCaptureMovieFileOutput) throws {
         guard let connection = output.connection(with: .video) else { throw TakeError("Video connection is unavailable.") }
         connection.setPortraitVideo(mirrored: false)
         let codecs: [AVVideoCodecType] = [.hevc, .h264]
@@ -151,11 +154,67 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
 
     func releaseCamera() {
         wantsCamera = false
+        if let cleanFrames { endCleanFrames(cleanFrames) }
         guard phase == .idle else { return }
         ready = false
-        guard !configuring else { return } // The in-flight update reconciles wantsCamera before releasing.
+        guard !configuring, !restoringCleanFrames else { return } // Reconcile wantsCamera after the in-flight change.
         let capture = session
         sessionQueue.async { if capture.isRunning { capture.stopRunning() } }
+    }
+
+    func beginCleanFrames(_ frames: CleanCameraFrames) {
+        guard wantsCamera, !configuring, cleanFrames == nil, !restoringCleanFrames, phase == .idle else { return }
+        #if targetEnvironment(simulator) && DEBUG
+        if CleanCameraFrames.usesSimulatorFixture {
+            cleanFrames = frames
+            cleanIssue = nil
+            frames.startSimulatorFixture()
+            return
+        }
+        #endif
+        guard ready else { return }
+        cleanFrames = frames
+        cleanIssue = nil
+        let capture = session, movie = self.movie
+        sessionQueue.async {
+            do { try frames.install(on: capture, movie: movie) }
+            catch {
+                let reason = error.localizedDescription
+                Task { @MainActor in self.cleanFramesFailed(frames, message: reason) }
+            }
+        }
+    }
+
+    func cleanFramesFailed(_ frames: CleanCameraFrames, message: String) {
+        guard frames === cleanFrames else { return }
+        cleanIssue = message
+    }
+
+    func endCleanFrames(_ frames: CleanCameraFrames) {
+        guard frames === cleanFrames else { return }
+        cleanFrames = nil
+        restoringCleanFrames = true
+        // SwiftUI may dismantle the surface during an update. Queue published
+        // changes while the private gate excludes a record or flip immediately.
+        Task { @MainActor in
+            if restoringCleanFrames { configuring = true }
+        }
+        let capture = session, movie = self.movie
+        sessionQueue.async {
+            let restored: Bool
+            do {
+                try frames.stop(on: capture, movie: movie)
+                restored = capture.isRunning && movie.connection(with: .video) != nil
+            } catch { restored = false }
+            Task { @MainActor in
+                self.restoringCleanFrames = false
+                self.configuring = false
+                self.cleanIssue = nil
+                self.ready = self.wantsCamera && restored
+                if !self.wantsCamera { self.releaseCamera() }
+                else if !restored { await self.configure() }
+            }
+        }
     }
 
     func selectFile(_ url: URL) throws {
@@ -232,7 +291,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     }
 
     func record() {
-        guard wantsCamera, phase == .idle, ready, !configuring else { return }
+        guard wantsCamera, phase == .idle, ready, !configuring, cleanFrames == nil, !restoringCleanFrames else { return }
         guard session.isRunning else { message = "Camera unavailable. Return to the app and try again."; return }
         do {
             try soundtrack.beginTake(restoreTempo: originalTempo)

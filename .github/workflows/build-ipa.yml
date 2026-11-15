@@ -74,11 +74,20 @@ jobs:
           xcrun simctl bootstatus "$device" -b
           settings=(-project "$APP.xcodeproj" -scheme DanceCameraScreenTests -configuration Debug
                     -destination "platform=iOS Simulator,id=$device" -derivedDataPath "$RUNNER_TEMP/simulator"
-                    -parallel-testing-enabled NO)
+                    -parallel-testing-enabled NO SWIFT_ACTIVE_COMPILATION_CONDITIONS=DEBUG)
           xcodebuild "${settings[@]}" build-for-testing
           xcrun simctl install "$device" "$RUNNER_TEMP/simulator/Build/Products/Debug-iphonesimulator/$APP.app"
           xcrun simctl privacy "$device" grant camera dev.codexxp.dancecamera
+          movie="$RUNNER_TEMP/clean-camera-test.mp4"
+          xcrun simctl io "$device" recordVideo --codec=h264 "$movie" &
+          recorder=$!
+          trap 'kill -INT "$recorder" 2>/dev/null || true' EXIT
           xcodebuild "${settings[@]}" test-without-building
+          kill -INT "$recorder"
+          wait "$recorder" || test -s "$movie"
+          trap - EXIT
+          xcrun swiftc -parse-as-library -target "$(uname -m)-apple-macos15.0" Checks/CheckRehearsalMovie.swift -o "$RUNNER_TEMP/check-rehearsal"
+          "$RUNNER_TEMP/check-rehearsal" "$movie"
 
       - name: Package and verify IPA
         id: package
