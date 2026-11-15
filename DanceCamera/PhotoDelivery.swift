@@ -25,8 +25,7 @@ final class PhotoDelivery: ObservableObject {
         let file = reports.appendingPathComponent(stamp.replacingOccurrences(of: ":", with: "-") + ".txt")
         let info = Bundle.main.infoDictionary
         let version = info?["CFBundleShortVersionString"] as? String ?? "?"
-        let build = info?["CFBundleVersion"] as? String ?? "?"
-        var lines = ["Dance Camera \(version) (\(build))", stamp, description,
+        var lines = ["Dance Camera \(version)", stamp, description,
                      "Finish at original song tempo  " + (originalTempo ? "On" : "Off")]
         if !recordedRates.isEmpty {
             let rates = recordedRates.map { String(format: "%.2f×", $0) }.joined(separator: ", ")

@@ -1,10 +1,11 @@
-"""Publish the first build of a marketing version as stable and subsequent builds as prereleases."""
+"""Choose a semantic version before compiling and publish one immutable IPA per version."""
 
 import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
 
 
 def api(path, *options):
@@ -25,51 +26,55 @@ def has_asset(release, filename):
 
 
 def version_of(tag):
-    # Historical build-qualified releases also count when comparing Latest.
-    match = re.fullmatch(r"v(\d+)\.(\d+)\.(\d+)(?:-build\.\d+)?", tag)
+    match = re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", tag)
     return tuple(map(int, match.groups())) if match else ()
+
+
+def choose_version(requested, releases, commit):
+    base = version_of("v" + requested)
+    if not base:
+        raise ValueError(f"Invalid project version {requested!r}")
+    published = []
+    for release in releases:
+        version = version_of(release["tag_name"])
+        if not version or release["prerelease"]:
+            continue
+        if release["target_commitish"] == commit:
+            return release["tag_name"][1:]
+        published.append(version)
+    latest = max(published, default=())
+    if latest >= base:
+        base = (latest[0], latest[1], latest[2] + 1)
+    return ".".join(map(str, base))
 
 
 def main():
     repo, commit = os.environ["GITHUB_REPOSITORY"], os.environ["GITHUB_SHA"]
-    version, build = os.environ["VERSION"], os.environ["GITHUB_RUN_NUMBER"]
-    filename = os.environ["FILENAME"]
-    ipa = str(Path(os.environ["RUNNER_TEMP"]) / filename)
-    title = f"{os.environ['APP']} {version} (build {build})"
-    stable = f"v{version}"
-    dev = f"{stable}-build.{build}"
     pages = api(f"repos/{repo}/releases?per_page=100", "--paginate", "--slurp")
-    releases = {r["tag_name"]: r for page in pages for r in page}
-
-    # A rerun of a build always reuses its own release, including an interrupted draft.
-    tag = dev if dev in releases else stable
+    releases = [r for page in pages for r in page]
+    if len(sys.argv) == 3 and sys.argv[1] == "--select-version":
+        print(choose_version(sys.argv[2], releases, commit))
+        return
+    version = os.environ["VERSION"]
+    filename = os.environ["FILENAME"]
+    if not version_of("v" + version) or filename != f"{os.environ['APP']}-v{version}.ipa":
+        raise ValueError("Unexpected release version or IPA filename")
+    ipa = str(Path(os.environ["RUNNER_TEMP"]) / filename)
+    title, tag = f"Dance Camera {version}", f"v{version}"
     target = tag_commit(repo, tag)
-    existing = releases.get(tag)
-    if tag == stable and existing:
-        owned = (existing["draft"] and existing["target_commitish"] == commit and existing["name"] == title
-                 or not existing["draft"] and target == commit and (existing["name"] == title or has_asset(existing, filename)))
-        if not owned:
-            tag = dev
-    elif tag == stable and target is not None and target != commit:
-        tag = dev
-    if tag == dev:
-        print(f"::notice::Publishing development build {tag}. Bump MARKETING_VERSION for the next stable release.", flush=True)
-        target = tag_commit(repo, tag)
-    existing = releases.get(tag)
+    existing = next((r for r in releases if r["tag_name"] == tag), None)
     if target is not None and target != commit:
         raise RuntimeError(f"Tag {tag} already points at another commit")
     if existing and not existing["draft"]:
-        if target != commit or not has_asset(existing, filename):
+        if existing["prerelease"] or target != commit or not has_asset(existing, filename):
             raise RuntimeError(f"Published release {tag} does not match this build")
         print(f"Verified existing published IPA on {tag}.")
         return
 
-    highest = max((version_of(r["tag_name"]) for r in releases.values()
+    highest = max((version_of(r["tag_name"]) for r in releases
                    if not r["draft"] and not r["prerelease"]), default=())
-    latest = tag == stable and version_of(stable) >= highest
+    latest = version_of(tag) >= highest
     flags = [f"--latest={str(latest).lower()}"]
-    if tag == dev:
-        flags.append("--prerelease")
     if existing:
         if existing["target_commitish"] != commit or existing["name"] != title:
             raise RuntimeError(f"Draft {tag} belongs to a different build")

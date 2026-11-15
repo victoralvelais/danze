@@ -48,6 +48,7 @@ final class StreamingSoundtrack: ObservableObject {
     func pause() { player.pause() }
     func resume() { player.resume() }
     func beginTake() throws { try player.beginTake() }
+    func stoppingCamera() { player.stoppingCamera() }
 
     func finishTake() async throws -> SoundtrackTake? { try await player.finishTake() }
     func discardTake() { player.discardTake() }
@@ -124,7 +125,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
         queue.async {
             let tuned = min(2, max(0.5, value))
             guard self.rate != tuned else { return }
-            self.sourceAudio.cancel()
+            self.sourceAudio.changeTransport(self.sourceAnchor(), at: AVAudioTime.seconds(forHostTime: mach_absolute_time()))
             self.rate = tuned
             self.pitch.rate = Float(self.rate)
             if self.running { self.markSpeed(self.rate) }
@@ -210,7 +211,7 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     func pause() {
         queue.async {
             guard self.lastState == .playing || self.lastState == .buffering else { return }
-            self.sourceAudio.cancel()
+            self.sourceAudio.changeTransport(self.sourceAnchor(), at: AVAudioTime.seconds(forHostTime: mach_absolute_time()))
             self.paused = true
             if self.running { self.node.pause(); self.markSpeed(1) }
             self.running = false
@@ -233,11 +234,13 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     func beginTake() throws {
         try queue.sync {
             try tap.begin()
-            sourceAudio.begin(sourceAnchor(), stableFrom: stableFrom)
+            let playingRate = running && !paused && graph.isRunning && node.isPlaying ? rate : nil
+            sourceAudio.begin(sourceAnchor(), stableFrom: stableFrom, playingRate: playingRate)
         }
     }
 
-    func discardTake() { queue.sync { sourceAudio.cancel(); tap.discard() } }
+    func stoppingCamera() { queue.async { self.sourceAudio.stoppingCamera() } }
+    func discardTake() { queue.sync { sourceAudio.discard(); tap.discard() } }
 
     func finishTake() async throws -> SoundtrackTake? {
         try await withCheckedThrowingContinuation { continuation in

@@ -49,7 +49,7 @@ enum SourceAudioCheck {
         return Double(count) * hz / Double(end - start)
     }
 
-    private static func renderPlayer(buffers: [AVAudioPCMBuffer], reference: URL?, rate: Double, to url: URL) throws {
+    private static func renderPlayer(buffers: [AVAudioPCMBuffer], reference: URL?, rate: Double, duration: Double = 2, to url: URL) throws {
         let format = buffers[0].format
         let engine = AVAudioEngine(), player = AVAudioPlayerNode(), pitch = AVAudioUnitTimePitch()
         engine.attach(player); engine.attach(pitch)
@@ -68,8 +68,8 @@ enum SourceAudioCheck {
         let out = try AVAudioFile(forWriting: url, settings: format.settings)
         let block = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: 1024)!
         var retries = 0
-        while out.framePosition < Int64(2 * hz) {
-            let n = UInt32(min(1024, Int64(2 * hz) - out.framePosition))
+        while out.framePosition < Int64(duration * hz) {
+            let n = UInt32(min(1024, Int64(duration * hz) - out.framePosition))
             let status = try engine.renderOffline(n, to: block)
             if status == .cannotDoInCurrentContext && retries < 32 { retries += 1; continue }
             try require(status == .success && block.frameLength > 0, "Cannot render streamed player.")
@@ -141,11 +141,11 @@ enum SourceAudioCheck {
         let srcStart = 0.55 + 0.2 * rate
         try require(abs((source.offset(videoStart: start, duration: 2) ?? -5) - srcStart) < 0.00001, "Wrong source offset.")
         try require(source.offset(videoStart: start, duration: 5) == nil, "Accepted uncovered source audio.")
-        let short = SourceSoundtrack(file: source.file, first: begin, last: end, stableFrom: 9,
+        let short = SourceSoundtrack(file: source.file, first: begin, last: end, rate: rate, stableFrom: 9,
                                      firstFrame: 0, frameCount: 44_100, sampleRate: hz)
         try require(short.offset(videoStart: start, duration: 2) == nil, "Accepted an incomplete source file.")
         let drift = PlayerAnchor(host: end.host, song: end.song + 0.1, rate: rate, route: begin.route)
-        let drifting = SourceSoundtrack(file: source.file, first: begin, last: drift, stableFrom: 9,
+        let drifting = SourceSoundtrack(file: source.file, first: begin, last: drift, rate: rate, stableFrom: 9,
                                         firstFrame: 0, frameCount: source.frameCount, sampleRate: hz)
         try require(drifting.offset(videoStart: start, duration: 2) == nil, "Accepted inconsistent player clocks.")
         for restore in [false, true] {
@@ -171,10 +171,100 @@ enum SourceAudioCheck {
         capture.begin(begin, stableFrom: 9)
         capture.cancel()
         try require(capture.finish(end) == nil && capture.fallback == .transport, "A transport change retained the source take or lost its reason.")
+        capture.begin(begin, stableFrom: 9)
+        capture.stoppingCamera()
+        capture.changeTransport(end, at: 12.21)
+        guard let stopped = capture.finish(nil) else { throw TakeError("Post-stop pause discarded already recorded music.") }
+        try require(stopped.coversStableTransport(videoStart: start, duration: 2) &&
+                    !stopped.coversStableTransport(videoStart: start, duration: 2.02), "Pause inside the video was concealed.")
         let out = root.appendingPathComponent("intentional-fallback.mp4")
         let export = try await TakeExport.save(video: mov, audio: damaged, audioOffset: 0, videoStart: start, source: mismatched, to: out)
         try require(export.audioPath == .mix(.alignment), "Wrong reason for mixer fallback.")
         let fallback = try await samples(out)
         try require(rms(fallback, at: 0.505) < 0.055 && rms(fallback, at: 0.55) > 0.1, "Did not preserve the live mix on fallback.")
+    }
+
+    static func checkAlignment(_ mov: URL, _ root: URL) async throws {
+        let rate = 0.75, mixStart = 1.05, marker = 1.60
+        let format = AVAudioFormat(standardFormatWithSampleRate: hz, channels: 1)!
+        let music = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(4 * hz))!
+        music.frameLength = music.frameCapacity
+        for i in 0..<Int(music.frameLength) {
+            let t = Double(i) / hz, phase = 2 * Double.pi
+            // A non-periodic amplitude pattern with an independent pitch marker.
+            let slow = pow(max(0, sin(phase * (1.2 * t + 0.29 * t * t))), 3)
+            let fast = pow(max(0, sin(phase * (4.9 * t - 0.22 * t * t) + 0.4)), 4)
+            let gain = 0.05 + 0.35 * slow + 0.20 * fast
+            let pitch = t < marker ? 330.0 : 770.0
+            music.floatChannelData![0][i] = Float(gain * (sin(phase * pitch * t) + 0.04 * sin(phase * 2300 * t)))
+        }
+        let capture = SourceAudioCapture()
+        capture.append(music)
+        capture.begin(nil, stableFrom: 9, playingRate: rate)
+        guard let song = capture.finish(nil) else { throw TakeError("Uninterrupted source was lost with absent render anchors.") }
+        try require(song.offset(videoStart: 10, duration: 2) == nil, "Invented a player clock anchor.")
+        let live = root.appendingPathComponent("live-stretched.caf")
+        try renderPlayer(buffers: [music], reference: nil, rate: rate, duration: 4, to: live)
+        let baseline = try await samples(live)
+        // Measure when the pitch change was actually heard, including the Apple unit's latency.
+        let ticks = 20..<180
+        guard let tick = ticks.first(where: { frequency(baseline, at: mixStart + Double($0) / 100) > 620 }) else {
+            throw TakeError("The rendered source marker did not fall in the camera take.")
+        }
+        let heardMarker = Double(tick) / 100 + 0.0125
+        let measuredStart = marker - heardMarker * rate
+        func write(_ data: [Float], named name: String) throws -> URL {
+            let url = root.appendingPathComponent(name + ".caf")
+            let file = try AVAudioFile(forWriting: url, settings: format.settings)
+            let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: UInt32(data.count))!
+            buffer.frameLength = buffer.frameCapacity
+            data.withUnsafeBufferPointer { buffer.floatChannelData![0].update(from: $0.baseAddress!, count: data.count) }
+            try file.write(from: buffer)
+            return url
+        }
+        var damage = baseline
+        let holes = [0.48, 0.79, 1.48]
+        for t in holes {
+            let frame = Int((mixStart + t) * hz)
+            for i in frame..<(frame + Int(0.025 * hz)) { damage[i] = 0 }
+        }
+        let mix = try write(damage, named: "damaged-stretched")
+        func offset(_ path: URL, _ take: URL) throws -> Double? {
+            try SoundtrackAlignment.offset(source: path, mix: take, mixStart: mixStart, duration: 2, rate: rate)
+        }
+        guard let start = try offset(song.file.url, mix) else { throw TakeError("Could not align the live, damaged 0.75× Apple render.") }
+        try require(abs(start - measuredStart) < 0.045, "Matched music did not align with the audible marker: \(start), \(measuredStart).")
+        for restore in [false, true] {
+            let target = root.appendingPathComponent("matched-\(restore).mp4")
+            let export = try await TakeExport.save(video: mov, audio: mix, audioOffset: -mixStart,
+                                                  speeds: [SpeedChange(host: 9, rate: rate)], restoreTempo: restore,
+                                                  videoStart: 10, source: song, appVersion: "0.1.2", to: target)
+            try require(export.audioPath == .matchedSource, "A recoverable soundtrack fell back to damaged mixer audio.")
+            let decoded = try await samples(target)
+            let scale = restore ? rate : 1
+            try require(abs(Double(decoded.count) / hz - 2 * scale) < 0.06, "Matched export changed movie tempo.")
+            let time = heardMarker * scale
+            try require(abs(frequency(decoded, at: time - 0.10) - 330) < 80 &&
+                        abs(frequency(decoded, at: time + 0.10) - 770) < 80, "Matched AAC lost its timing or pitch.")
+            for t in holes { try require(rms(decoded, at: (t + 0.01) * scale) > 0.012, "Damaged mix survived matched export.") }
+            let metadata = try await AVURLAsset(url: target).load(.metadata)
+            let comments = AVMetadataItem.metadataItems(from: metadata, filteredByIdentifier: .iTunesMetadataUserComment)
+            let comment = try await comments.first?.load(.stringValue)
+            try require(comment == "Dance Camera 0.1.2. " + export.audioPath.description, "Missing soundtrack report in the exported MP4.")
+        }
+        let silence = try write(Array(repeating: 0, count: baseline.count), named: "no-audio-to-match")
+        try require(try offset(song.file.url, silence) == nil, "Silent audio admitted a source match.")
+        var slipped = damage
+        let slip = Int(0.13 * hz), cut = Int((mixStart + 1) * hz)
+        for i in cut..<slipped.count { slipped[i] = baseline[i - slip] }
+        let discontinuous = try write(slipped, named: "real-slip")
+        try require(try offset(song.file.url, discontinuous) == nil, "A real timing change admitted a source match.")
+        let original = Array(UnsafeBufferPointer(start: music.floatChannelData![0], count: Int(music.frameLength)))
+        let repeated = try write(original + original, named: "ambiguous-song")
+        try require(try offset(repeated, mix) == nil, "Nonunique passages admitted a source match.")
+        let wrongRate = try SoundtrackAlignment.offset(source: song.file.url, mix: mix, mixStart: mixStart, duration: 2, rate: 1)
+        try require(wrongRate == nil, "The wrong playback rate admitted a source match.")
+        let incomplete = try SoundtrackAlignment.offset(source: song.file.url, mix: mix, mixStart: 0, duration: 8, rate: rate)
+        try require(incomplete == nil, "Accepted a partially covered take.")
     }
 }

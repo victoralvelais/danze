@@ -9,11 +9,12 @@ struct TakeError: LocalizedError {
 enum TakeExport {
     private static let log = Logger(subsystem: "dev.codexxp.dancecamera", category: "soundtrack")
     enum AudioPath: Equatable {
-        case none, source, mix(SourceFallback)
+        case none, source, matchedSource, mix(SourceFallback)
         var description: String {
             switch self {
             case .none: return "Camera video without a soundtrack."
-            case .source: return "Decoded song audio."
+            case .source: return "Decoded song audio. Verified by player timing."
+            case .matchedSource: return "Decoded song audio. Verified against the recorded music."
             case .mix(let reason): return "Captured mixer audio. " + reason.rawValue
             }
         }
@@ -30,7 +31,9 @@ enum TakeExport {
 
     // The offset is signed: the tap can already be playing when the camera starts.
     static func save(video: URL, audio: URL?, audioOffset: Double, speeds: [SpeedChange] = [], restoreTempo: Bool = true, videoStart: Double = 0,
-                     source: SourceSoundtrack? = nil, sourceFallback: SourceFallback = .noAnchor, to destination: URL) async throws -> Result {
+                     source: SourceSoundtrack? = nil, sourceFallback: SourceFallback = .noAnchor,
+                     appVersion: String? = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+                     to destination: URL) async throws -> Result {
         let videoAsset = AVURLAsset(url: video)
         let timeline = AVMutableComposition()
         guard let image = try await videoAsset.loadTracks(withMediaType: .video).first,
@@ -55,12 +58,20 @@ enum TakeExport {
         var audioPath = AudioPath.none
         if let audio {
             var fallback = source == nil ? sourceFallback : .alignment
-            if let source, let start = source.offset(videoStart: videoStart, duration: v.duration.seconds),
-               !scaled || ranges.allSatisfy({ abs($0.rate - source.first.rate) < 0.0001 }) {
+            var sourceStart = source?.offset(videoStart: videoStart, duration: v.duration.seconds)
+            var sourcePath = AudioPath.source
+            if let source, sourceStart == nil, source.coversStableTransport(videoStart: videoStart, duration: v.duration.seconds),
+               captured.allSatisfy({ abs($0.rate - source.rate) < 0.0001 }) {
+                sourceStart = try? SoundtrackAlignment.offset(source: source.file.url, mix: audio, mixStart: -audioOffset,
+                                                             duration: v.duration.seconds, rate: source.rate)
+                sourcePath = .matchedSource
+            }
+            if let source, let start = sourceStart,
+               !scaled || ranges.allSatisfy({ abs($0.rate - source.rate) < 0.0001 }) {
                 do {
                     var url = source.file.url, offset = -start
-                    if !scaled && source.first.rate != 1 {
-                        let range = TakeSpeedRange(start: 0, end: v.duration.seconds * source.first.rate, rate: 1 / source.first.rate)
+                    if !scaled && source.rate != 1 {
+                        let range = TakeSpeedRange(start: 0, end: v.duration.seconds * source.rate, rate: 1 / source.rate)
                         try renderAudio(url, offset: offset, ranges: [range], to: rendered)
                         url = rendered
                         offset = 0
@@ -69,7 +80,7 @@ enum TakeExport {
                                                   to: timeline, temporaryAAC: aac) else {
                         throw ExportError("The source recording does not span the take.")
                     }
-                    audioPath = .source
+                    audioPath = sourcePath
                 } catch {
                     for track in timeline.tracks(withMediaType: .audio) { timeline.removeTrack(track) }
                     try? FileManager.default.removeItem(at: aac)
@@ -77,7 +88,7 @@ enum TakeExport {
                     fallback = .render
                 }
             }
-            if audioPath != .source {
+            if audioPath == .none {
                 let added: Bool
                 if scaled {
                     try renderAudio(audio, offset: audioOffset, ranges: ranges, to: rendered)
@@ -90,6 +101,12 @@ enum TakeExport {
         }
         guard let mux = AVAssetExportSession(asset: timeline, presetName: AVAssetExportPresetPassthrough),
               mux.supportedFileTypes.contains(.mp4) else { throw ExportError("The camera format could not be packaged as MP4.") }
+        let note = AVMutableMetadataItem()
+        note.identifier = .iTunesMetadataUserComment
+        let app = ["Dance Camera", appVersion].compactMap { $0 }.joined(separator: " ")
+        note.value = (app + ". " + audioPath.description) as NSString
+        note.dataType = kCMMetadataBaseDataType_UTF8 as String
+        mux.metadata = (mux.metadata ?? []) + [note]
         try await mux.export(to: mp4, as: .mp4)
         try FileManager.default.moveItem(at: mp4, to: destination)
         log.info("\(audioPath.description, privacy: .public)")

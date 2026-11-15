@@ -252,6 +252,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
         guard phase == .recording else { return }
         phase = .saving
         message = "Saving take."
+        soundtrack.stoppingCamera()
         movie.stopRecording()
     }
 
