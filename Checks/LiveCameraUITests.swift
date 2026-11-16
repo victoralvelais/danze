@@ -1,27 +1,73 @@
 import XCTest
 
 final class LiveCameraUITests: XCTestCase {
-    func testRehearseWithoutAnAccountAndReturnToTheStudio() {
+    func testFullscreenHostingAndReturningToStudio() {
+        continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["-clean-camera-frame-fixture"]
+        app.launchArguments = ["-clean-camera-frame-fixture", "-live-overlay-song-fixture"]
         app.launch()
         app.buttons["Dance camera"].tap()
-        let setup = app.buttons["TikTok LIVE setup"]
-        XCTAssertTrue(setup.waitForExistence(timeout: 12))
-        setup.tap()
 
-        let clean = app.buttons["live.showCleanCamera"]
-        XCTAssertTrue(clean.waitForExistence(timeout: 6))
-        clean.tap()
-        let controls = app.buttons["Show camera controls"]
-        XCTAssertTrue(controls.waitForExistence(timeout: 6))
+        let fullscreen = app.buttons["live.fullscreen"]
+        XCTAssertTrue(fullscreen.waitForExistence(timeout: 12))
+        fullscreen.tap()
+        let reveal = app.buttons["live.reveal"]
+        let exit = app.buttons["live.exit"]
+        let song = app.descendants(matching: .any).matching(identifier: "live.nowPlaying").firstMatch
+
+        func hostButton(_ id: String) -> XCUIElement {
+            let button = app.buttons[id]
+            if !button.exists { reveal.tap() }
+            XCTAssertTrue(button.waitForExistence(timeout: 4))
+            return button
+        }
+
+        XCTAssertTrue(reveal.waitForExistence(timeout: 6))
         XCTAssertFalse(app.buttons["Record take"].exists)
-        // Leave the clean view onscreen for more than one full fixture cycle.
-        let recorded = expectation(description: "Capture both camera patterns")
-        DispatchQueue.main.asyncAfter(deadline: .now() + 3) { recorded.fulfill() }
-        wait(for: [recorded], timeout: 6)
-        controls.tap()
-        XCTAssertTrue(setup.waitForExistence(timeout: 6))
+        XCTAssertFalse(exit.exists)
+        XCTAssertFalse(song.exists)
+        let framing = hostButton("live.framing")
+        XCTAssertEqual(framing.value as? String, "Fill")
+        let songSwitch = hostButton("live.toggleSong")
+        XCTAssertEqual(songSwitch.value as? String, "Off")
+        songSwitch.tap()
+        XCTAssertTrue(song.waitForExistence(timeout: 10))
+        XCTAssertTrue(song.label.contains("Live Rehearsal"), song.label)
+
+        // The ticker stays on the audience picture when the host panel times out.
+        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: exit)
+        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 14), .completed)
+        XCTAssertTrue(song.exists)
+
+        hostButton("live.playback").tap()
+        let paused = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS[c] 'paused'"), object: song)
+        XCTAssertEqual(XCTWaiter.wait(for: [paused], timeout: 8), .completed)
+        hostButton("live.playback").tap()
+
+        hostButton("live.framing").tap()
+        XCTAssertEqual(framing.value as? String, "Fit")
+        hostButton("live.toggleSong").tap()
+        XCTAssertFalse(song.exists)
+        hostButton("live.hide").tap()
+        // The system screen recording must see both moving patterns even in Fit.
+        let painted = expectation(description: "Capture two alternating camera frames")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { painted.fulfill() }
+        wait(for: [painted], timeout: 5)
+
+        hostButton("live.microphone").tap()
+        XCTAssertTrue(app.navigationBars["Microphone"].waitForExistence(timeout: 8))
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "live.systemMicPicker").firstMatch.exists)
+        app.buttons["live.closeMic"].tap()
+        XCTAssertTrue(reveal.waitForExistence(timeout: 6))
+        hostButton("live.exit").tap()
+        XCTAssertTrue(fullscreen.waitForExistence(timeout: 6))
         XCTAssertTrue(app.buttons["Record take"].exists)
+
+        // Exercise the original entry point and the reachable system broadcast control.
+        app.buttons["TikTok LIVE setup"].tap()
+        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "live.startBroadcast").firstMatch.waitForExistence(timeout: 6))
+        app.buttons["live.showCleanCamera"].tap()
+        XCTAssertTrue(reveal.waitForExistence(timeout: 6))
+        XCTAssertEqual(hostButton("live.framing").value as? String, "Fit")
     }
 }

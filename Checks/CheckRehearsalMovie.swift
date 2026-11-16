@@ -24,7 +24,8 @@ enum CheckRehearsalMovie {
         output.alwaysCopiesSampleData = false
         reader.add(output)
         guard reader.startReading() else { throw reader.error ?? CocoaError(.fileReadUnknown) }
-        var redBlue = false, greenYellow = false, count = 0
+        var fitRedBlue = false, fitGreenYellow = false
+        var fillRedBlue = false, fillGreenYellow = false, count = 0
         var lastPattern = ""
         while let sample = output.copyNextSampleBuffer(), let frame = CMSampleBufferGetImageBuffer(sample) {
             count += 1
@@ -36,29 +37,34 @@ enum CheckRehearsalMovie {
             guard screen.height > screen.width else { continue }
             let width = min(screen.width, screen.height * 9 / 16)
             let height = width * 16 / 9
+            let fitted = CGRect(x: screen.midX - width / 2, y: screen.midY - height / 2, width: width, height: height)
             // AVFoundation's track transform maps the native pixels to display coordinates.
             // Sample the original screen recording in top-left coordinates, without rescaling.
-            func pixel(_ x: CGFloat, _ y: CGFloat) -> Pixel {
-                let display = CGPoint(x: screen.midX + (x - 0.5) * width, y: screen.midY + (y - 0.5) * height)
+            func pixel(_ x: CGFloat, _ y: CGFloat, in bounds: CGRect) -> Pixel {
+                let display = CGPoint(x: bounds.minX + x * bounds.width, y: bounds.minY + y * bounds.height)
                 let p = display.applying(inverse)
                 let row = max(0, min(h - 1, Int(p.y))) * CVPixelBufferGetBytesPerRow(frame)
                 let i = row + max(0, min(w - 1, Int(p.x))) * 4
                 return Pixel(r: bytes[i+2], g: bytes[i+1], b: bytes[i])
             }
-            let top = pixel(0.5, 0.25), bottom = pixel(0.5, 0.75)
-            let left = pixel(0.125, 0.25), right = pixel(0.875, 0.25)
+            let top = pixel(0.5, 0.25, in: fitted), bottom = pixel(0.5, 0.75, in: fitted)
+            let left = pixel(0.125, 0.25, in: fitted), right = pixel(0.875, 0.25, in: fitted)
+            let upperEdge = pixel(0.78, 0.025, in: screen), lowerEdge = pixel(0.33, 0.97, in: screen)
             if top.red || top.green || bottom.blue || bottom.yellow {
                 lastPattern = "top \(top), bottom \(bottom), left mark \(left), right \(right), time \(sample.presentationTimeStamp.seconds)"
             }
-            guard left.white && !right.white else { continue }
-            redBlue = redBlue || (top.red && bottom.blue)
-            greenYellow = greenYellow || (top.green && bottom.yellow)
-            if redBlue && greenYellow {
-                print("The simulator screen recording captured both moving portrait camera patterns and their left-side orientation mark.")
+            if left.white && !right.white {
+                fitRedBlue = fitRedBlue || (top.red && bottom.blue)
+                fitGreenYellow = fitGreenYellow || (top.green && bottom.yellow)
+            }
+            fillRedBlue = fillRedBlue || (top.red && bottom.blue && upperEdge.red && lowerEdge.blue)
+            fillGreenYellow = fillGreenYellow || (top.green && bottom.yellow && upperEdge.green && lowerEdge.yellow)
+            if fitRedBlue && fitGreenYellow && fillRedBlue && fillGreenYellow {
+                print("The simulator recording captured motion at both screen edges in Fill and preserved the full portrait frame and left mark in Fit.")
                 return
             }
         }
-        let details = "Read \(count) screen frames. Red/blue=\(redBlue), green/yellow=\(greenYellow). Last candidate: \(lastPattern). Reader: \(reader.status.rawValue)."
+        let details = "Read \(count) screen frames. Fit red/blue=\(fitRedBlue), green/yellow=\(fitGreenYellow). Fill red/blue=\(fillRedBlue), green/yellow=\(fillGreenYellow). Last candidate: \(lastPattern). Reader: \(reader.status.rawValue)."
         FileHandle.standardError.write(Data(("::error::Rehearsal movie missing expected camera picture. " + details + "\n").utf8))
         exit(1)
     }

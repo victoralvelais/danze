@@ -5,6 +5,7 @@ import SwiftUI
 /// A normal UIKit image layer appears in the screen compositor's picture.
 struct CleanCameraSurface: UIViewRepresentable {
     @ObservedObject var camera: DanceRecorder
+    let fillsFrame: Bool
 
     @MainActor final class Coordinator {
         let frames = CleanCameraFrames()
@@ -29,7 +30,7 @@ struct CleanCameraSurface: UIViewRepresentable {
         // intrinsic size in points. The parent offers the actual screen bounds.
         let view = UIView()
         view.backgroundColor = .black
-        view.layer.contentsGravity = .resizeAspect
+        view.clipsToBounds = true
         view.isOpaque = true
         let coordinator = context.coordinator
         coordinator.display = Task { @MainActor [weak view, weak coordinator] in
@@ -54,7 +55,11 @@ struct CleanCameraSurface: UIViewRepresentable {
         return CGSize(width: width, height: height)
     }
 
-    func updateUIView(_ view: UIView, context: Context) { context.coordinator.attach() }
+    func updateUIView(_ view: UIView, context: Context) {
+        let gravity: CALayerContentsGravity = fillsFrame ? .resizeAspectFill : .resizeAspect
+        if view.layer.contentsGravity != gravity { view.layer.contentsGravity = gravity }
+        context.coordinator.attach()
+    }
 
     static func dismantleUIView(_ view: UIView, coordinator: Coordinator) {
         coordinator.closed = true

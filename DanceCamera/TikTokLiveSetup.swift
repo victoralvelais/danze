@@ -29,8 +29,19 @@ struct TikTokLiveSetup: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section("Mobile gaming") {
-                    Text("In TikTok, open LIVE and choose Mobile gaming. Start sharing your screen there, then return to Dance Camera.")
+                Section(captured ? "Broadcast controls" : "Start screen broadcast") {
+                    HStack(spacing: 12) {
+                        BroadcastPicker()
+                            .frame(width: 52, height: 52)
+                            .background(.quaternary, in: Circle())
+                            .accessibilityLabel(captured ? "Open broadcast controls" : "Start screen broadcast")
+                            .accessibilityIdentifier("live.startBroadcast")
+                        Text(captured ? "iOS is capturing this screen. Tap the broadcast button for system controls." :
+                            "Tap the broadcast button. Choose TikTok if listed, then confirm in iOS to share your screen.")
+                            .font(.subheadline)
+                    }
+                }
+                Section("Camera") {
                     Button("Show clean camera") { onShowCleanCamera() }
                         .accessibilityIdentifier("live.showCleanCamera")
                     if let playbackAction {
@@ -45,19 +56,12 @@ struct TikTokLiveSetup: View {
                         Text("Music stopped. Tap Play music to restart the selected song.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Text("Tap the clean camera picture to bring back the controls. End your LIVE in TikTok.")
+                    Text("Tap the fullscreen picture to show the host controls.")
                         .font(.footnote).foregroundStyle(.secondary)
                 }
-                Section("iPhone broadcast picker") {
-                    HStack {
-                        Text("Choose a broadcast provider")
-                        Spacer()
-                        BroadcastPicker()
-                            .frame(width: 48, height: 48)
-                            .accessibilityIdentifier("systemBroadcastPicker")
-                    }
-                    Text("Choose TikTok if it appears. iOS shows the broadcast providers installed on this phone.")
-                        .font(.footnote).foregroundStyle(.secondary)
+                Section("TikTok Mobile gaming") {
+                    Text(captured ? "Manage or end your TikTok LIVE in TikTok." :
+                        "If TikTok is missing from the picker or needs setup, open LIVE in TikTok and choose Mobile gaming. Start sharing there, then return to Dance Camera.")
                 }
                 Section("Try a private rehearsal") {
                     Text("Open the clean camera and start Screen Recording from Control Center. Choose Photos as the destination. Stop recording and play it back to check the picture and music.")
@@ -91,6 +95,39 @@ struct TikTokLiveSetup: View {
         guard captureBegan, captured, scene == .active, camera.ready, !waitingForMusic, playbackAction == nil else { return }
         captureBegan = false
         onShowCleanCamera()
+    }
+}
+
+struct BroadcastMicrophoneSheet: View {
+    @Environment(\.dismiss) private var dismiss
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Broadcast microphone") {
+                    HStack {
+                        Text("Open iPhone broadcast controls")
+                        Spacer()
+                        BroadcastPicker()
+                            .frame(width: 48, height: 48)
+                            .accessibilityIdentifier("live.systemMicPicker")
+                    }
+                    Text("Use Microphone in the iPhone broadcast controls to turn your voice on or off when available.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
+                Section("While sharing in TikTok") {
+                    Text("Swipe down from the top-right corner to open Control Center. Touch and hold Screen Recording and look for Microphone. If TikTok manages your mic, use its LIVE audio controls.")
+                }
+            }
+            .navigationTitle("Microphone")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") { dismiss() }.accessibilityIdentifier("live.closeMic")
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 

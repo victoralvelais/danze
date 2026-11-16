@@ -10,12 +10,30 @@ final class StreamingSoundtrack: ObservableObject {
     @Published private(set) var title = ""
     private let player = SoundtrackPlayer()
     private var generation = UUID()
+    private var metadataTask: Task<Void, Never>?
 
-    func play(_ url: URL, title: String) { start(.file(url), title: title) }
+    func play(_ url: URL, title: String) {
+        start(.file(url), title: title)
+        let id = generation
+        metadataTask = Task {
+            guard let tags = try? await AVURLAsset(url: url).load(.commonMetadata) else { return }
+            func text(_ key: AVMetadataIdentifier) async -> String? {
+                guard let item = AVMetadataItem.metadataItems(from: tags, filteredByIdentifier: key).first,
+                      let value = try? await item.load(.stringValue) else { return nil }
+                let trimmed = value.trimmingCharacters(in: .whitespacesAndNewlines)
+                return trimmed.isEmpty ? nil : trimmed
+            }
+            let name = await text(.commonIdentifierTitle) ?? title
+            let artist = await text(.commonIdentifierArtist)
+            guard !Task.isCancelled, generation == id else { return }
+            self.title = songDisplayName(name, artist: artist)
+        }
+    }
     func playLibrary(_ url: URL, title: String) { start(.library(url), title: title) }
     func play(_ request: URLRequest, title: String) { start(.network(request), title: title) }
 
     private func start(_ source: MusicSource, title: String) {
+        metadataTask?.cancel()
         let id = UUID()
         generation = id
         self.title = title
@@ -29,6 +47,7 @@ final class StreamingSoundtrack: ObservableObject {
     }
 
     func stop() {
+        metadataTask?.cancel()
         generation = UUID()
         player.stop()
         state = .idle

@@ -229,14 +229,14 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         let local = URL.temporaryDirectory.appending(path: UUID().uuidString).appendingPathExtension(url.pathExtension)
         try FileManager.default.copyItem(at: url, to: local)
-        start(.file(local, url.lastPathComponent), key: "file:" + url.absoluteString)
+        start(.file(local, url.deletingPathExtension().lastPathComponent), key: "file:" + url.absoluteString)
     }
 
     func selectLibrary(_ item: MPMediaItem) throws {
         guard !item.hasProtectedAsset, let url = item.assetURL else {
             throw TakeError("This song has no recordable audio available. Choose a downloaded, unprotected Music track.")
         }
-        start(.library(url, item.title ?? "Music track"), key: "music:" + String(item.persistentID))
+        start(.library(url, songDisplayName(item.title ?? "Music track", artist: item.artist)), key: "music:" + String(item.persistentID))
     }
 
     func selectStream(_ request: URLRequest, title: String, key: String, enqueue: Bool) {

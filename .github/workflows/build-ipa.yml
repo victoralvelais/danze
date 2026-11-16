@@ -81,6 +81,19 @@ jobs:
           wait "$boot"
           xcrun simctl install "$device" "$RUNNER_TEMP/simulator/Build/Products/Debug-iphonesimulator/$APP.app"
           xcrun simctl privacy "$device" grant camera dev.codexxp.dancecamera
+          data=$(xcrun simctl get_app_container "$device" dev.codexxp.dancecamera data)
+          python3 - "$data/Documents/Live Rehearsal.wav" <<'PY'
+          import math, struct, sys, wave
+          from pathlib import Path
+          path = Path(sys.argv[1])
+          path.parent.mkdir(exist_ok=True)
+          hz = 22050
+          tone = b"".join(struct.pack("<h", round(900 * math.sin(2 * math.pi * 440 * i / hz))) for i in range(hz))
+          with wave.open(str(path), "wb") as track:
+              track.setparams((1, 2, hz, 0, "NONE", "not compressed"))
+              for _ in range(240):
+                  track.writeframesraw(tone)
+          PY
           movie="$RUNNER_TEMP/clean-camera-test.mp4"
           xcrun simctl io "$device" recordVideo --codec=h264 "$movie" &
           recorder=$!

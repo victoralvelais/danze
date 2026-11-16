@@ -2,14 +2,18 @@ import Foundation
 import CryptoKit
 import Network
 
+func songDisplayName(_ title: String, artist: String?) -> String {
+    guard let artist = artist?.trimmingCharacters(in: .whitespacesAndNewlines), !artist.isEmpty else { return title }
+    return "\(title) — \(artist)"
+}
+
 struct LibrarySong: Decodable, Identifiable {
     let id: String
     let title: String
     let artist: String?
 
     var displayName: String {
-        guard let artist, !artist.isEmpty else { return title }
-        return "\(title) — \(artist)"
+        songDisplayName(title, artist: artist)
     }
 }
 

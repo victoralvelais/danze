@@ -15,9 +15,11 @@ Start in **Music**. Connect to Navidrome to search songs and browse albums and p
 
 ## TikTok LIVE on iPhone
 
-Choose your song, dance tempo and lens in Dance Camera. In TikTok, open **+ → LIVE → Mobile gaming**. Turn the broadcast microphone off to hear the app music on its own. Start screen sharing when you are ready for TikTok to broadcast, then switch back to Dance Camera. [iPhone screen sharing on TikTok](https://apps.apple.com/id/iphone/story/id1853849325)
+Choose a song, tempo and camera lens. Open **Dance camera → LIVE** and tap the round button under **Start screen broadcast**. If iOS lists TikTok, select it and confirm **Start Broadcast** when ready. If TikTok requires its own LIVE setup, use **TikTok → + → LIVE → Mobile gaming**, start the screen share there, and switch back to Dance Camera. TikTok controls when your audience can watch. [Apple’s broadcast picker](https://developer.apple.com/documentation/replaykit/rpsystembroadcastpickerview) · [TikTok screen sharing on iPhone](https://apps.apple.com/id/iphone/story/id1853849325)
 
-Open **Dance camera → LIVE**, resume the music if needed, and choose **Show clean camera**. The audience sees the whole portrait camera frame. Tap the picture to return to the controls. End the LIVE in TikTok. To rehearse privately, use the iPhone’s **Screen Recording** in Control Center and review the result in Photos. For the first TikTok test, listen on a second device to check that the music comes through with AirPods connected.
+Tap **Full Screen** on the camera preview to hide the studio. **Fill** uses the entire display and crops some of the picture on tall phones. **Fit** keeps the whole camera frame. Tap the picture for host controls. **Song** shows the current title and artist when available, including a paused indicator. You can play or pause from the same panel. The panel hides after five seconds or when you tap **Hide**. **Exit Full Screen** returns to the studio. TikTok shares whatever is visible while the controls are open.
+
+For your voice, tap the picture, choose **Mic**, and open the round iPhone broadcast control. Use **Microphone** there when offered, or use TikTok’s LIVE audio controls if TikTok manages the mic. To rehearse privately, use **Screen Recording** in Control Center and listen to the result in Photos. End a TikTok LIVE in TikTok. [Apple’s microphone control](https://developer.apple.com/documentation/replaykit/rpsystembroadcastpickerview/showsmicrophonebutton)
 
 ## Music sources
 

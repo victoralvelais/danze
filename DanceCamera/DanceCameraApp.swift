@@ -71,6 +71,15 @@ struct DanceCameraView: View {
             do { try camera.selectFile(result.get()); libraryMessage = "" }
             catch { if (error as NSError).code != NSUserCancelledError { libraryMessage = error.localizedDescription } }
         }
+        #if targetEnvironment(simulator) && DEBUG
+        .task {
+            let file = URL.documentsDirectory.appending(path: "Live Rehearsal.wav")
+            if ProcessInfo.processInfo.arguments.contains("-live-overlay-song-fixture"),
+               camera.soundtrack.title.isEmpty, FileManager.default.fileExists(atPath: file.path) {
+                try? camera.selectFile(file)
+            }
+        }
+        #endif
         .onChange(of: scene) { _, phase in
             if phase == .background, cameraOpen { camera.interrupt(); camera.releaseCamera() }
             if phase == .active, cameraOpen { Task { await camera.configure() } }
@@ -134,21 +143,7 @@ private struct CameraStudio: View {
     var body: some View {
         Group {
             if cleanCamera {
-                ZStack {
-                    Color.black
-                    CleanCameraSurface(camera: camera)
-                    if let problem = camera.cleanIssue ?? (!camera.ready && !camera.message.isEmpty ? camera.message : nil) {
-                        Text(problem).foregroundStyle(.white).padding()
-                    }
-                }
-                .ignoresSafeArea()
-                .contentShape(Rectangle())
-                .onTapGesture { cleanCamera = false }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Show camera controls")
-                .accessibilityAddTraits(.isButton)
-                .accessibilityAction { cleanCamera = false }
-                .accessibilityAction(.escape) { cleanCamera = false }
+                FullscreenCamera(camera: camera, music: camera.soundtrack) { cleanCamera = false }
             } else {
                 studio
             }
@@ -196,7 +191,19 @@ private struct CameraStudio: View {
             ZStack {
                 Color.black
                 if camera.ready { Preview(session: camera.session, position: camera.position, configuring: camera.configuring) }
-            }.clipShape(RoundedRectangle(cornerRadius: 14))
+            }
+            .overlay(alignment: .bottomTrailing) {
+                Button { cleanCamera = true } label: {
+                    Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                        .font(.subheadline.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
+                        .background(.black.opacity(0.75), in: Capsule())
+                }
+                .foregroundStyle(.white).buttonStyle(.plain)
+                .disabled(camera.phase != .idle)
+                .accessibilityIdentifier("live.fullscreen")
+                .padding(8)
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 14))
             PlayerControls(camera: camera, music: camera.soundtrack)
             Toggle("Finish at original song tempo", isOn: $camera.originalTempo)
                 .font(.subheadline).disabled(camera.phase != .idle)
@@ -242,6 +249,138 @@ private struct CameraStudio: View {
             application.isIdleTimerDisabled = previousIdleTimer
             self.previousIdleTimer = nil
         }
+    }
+}
+
+private struct FullscreenCamera: View {
+    @ObservedObject var camera: DanceRecorder
+    @ObservedObject var music: StreamingSoundtrack
+    let onExit: () -> Void
+    @AppStorage("live.camera.fillsFrame") private var fillsFrame = true
+    @AppStorage("live.camera.showsSong") private var showsSong = false
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOver
+    @Environment(\.scenePhase) private var scene
+    @State private var controls = false
+    @State private var microphone = false
+    @State private var activity = UUID()
+
+    var body: some View {
+        ZStack {
+            ZStack {
+                Color.black
+                CleanCameraSurface(camera: camera, fillsFrame: fillsFrame)
+                if let problem = camera.cleanIssue ?? (!camera.ready && !camera.message.isEmpty ? camera.message : nil) {
+                    Text(problem).foregroundStyle(.white).padding()
+                }
+            }
+            .ignoresSafeArea()
+            .contentShape(Rectangle())
+            .onTapGesture { toggleControls() }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(controls ? "Hide camera controls" : "Show camera controls")
+            .accessibilityAddTraits(.isButton)
+            .accessibilityIdentifier("live.reveal")
+            .accessibilityAction { toggleControls() }
+            .accessibilityAction(.escape) { onExit() }
+
+            VStack(alignment: .leading) {
+                if showsSong, let status = songStatus, !music.title.isEmpty {
+                    let line = status.isEmpty ? music.title : "\(status) · \(music.title)"
+                    Label(line, systemImage: "music.note")
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(2)
+                        .padding(.vertical, 7).padding(.horizontal, 12)
+                        .background(.black.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+                        .accessibilityLabel(status.isEmpty ? "Now playing, \(music.title)" : line)
+                        .accessibilityIdentifier("live.nowPlaying")
+                        .allowsHitTesting(false)
+                }
+                Spacer()
+                if controls { hostControls }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 14).padding(.vertical, 8)
+            .foregroundStyle(.white)
+        }
+        .sheet(isPresented: $microphone) { BroadcastMicrophoneSheet() }
+        .task(id: activity) {
+            guard controls, !voiceOver, !microphone, scene == .active else { return }
+            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+            guard !Task.isCancelled else { return }
+            controls = false
+        }
+        .onChange(of: scene) { _, _ in activity = UUID() }
+        .onChange(of: voiceOver) { _, _ in activity = UUID() }
+        .onChange(of: microphone) { _, _ in activity = UUID() }
+    }
+
+    private var songStatus: String? {
+        switch music.state {
+        case .playing: return ""
+        case .paused: return "Paused"
+        case .buffering: return "Loading"
+        case .idle, .ended, .failed: return nil
+        }
+    }
+
+    private func toggleControls() {
+        controls.toggle()
+        activity = UUID()
+    }
+
+    private var hostControls: some View {
+        VStack(spacing: 4) {
+            HStack {
+                Button { onExit() } label: {
+                    Label("Exit Full Screen", systemImage: "arrow.down.right.and.arrow.up.left")
+                        .frame(minHeight: 44)
+                }
+                .accessibilityIdentifier("live.exit")
+                Spacer()
+                if !music.title.isEmpty {
+                    let active = music.state == .playing || music.state == .buffering
+                    Button {
+                        camera.togglePlayback()
+                        activity = UUID()
+                    } label: {
+                        Image(systemName: active ? "pause.fill" : "play.fill").frame(width: 44, height: 44)
+                    }
+                    .accessibilityLabel(active ? "Pause music" : (music.state == .paused ? "Resume music" : "Play music"))
+                    .accessibilityIdentifier("live.playback")
+                }
+                Button("Hide") { toggleControls() }.frame(minHeight: 44)
+                    .accessibilityLabel("Hide controls").accessibilityIdentifier("live.hide")
+            }
+            Divider().overlay(.white.opacity(0.4))
+            HStack {
+                Button {
+                    fillsFrame.toggle()
+                    activity = UUID()
+                } label: {
+                    Label(fillsFrame ? "Fill" : "Fit", systemImage: "aspectratio").frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .accessibilityLabel("Camera framing").accessibilityValue(fillsFrame ? "Fill" : "Fit")
+                .accessibilityHint(fillsFrame ? "Show the entire frame" : "Fill the screen")
+                .accessibilityIdentifier("live.framing")
+                Button {
+                    showsSong.toggle()
+                    activity = UUID()
+                } label: {
+                    Label("Song", systemImage: showsSong ? "checkmark.circle.fill" : "circle")
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .accessibilityLabel("Show current song").accessibilityValue(showsSong ? "On" : "Off")
+                .accessibilityIdentifier("live.toggleSong")
+                Button { microphone = true } label: {
+                    Label("Mic", systemImage: "mic").frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .accessibilityLabel("Broadcast microphone controls").accessibilityIdentifier("live.microphone")
+            }
+        }
+        .font(.subheadline.weight(.semibold))
+        .buttonStyle(.plain)
+        .padding(.horizontal, 12).padding(.vertical, 4)
+        .background(.black.opacity(0.82), in: RoundedRectangle(cornerRadius: 14))
     }
 }
 
