@@ -47,11 +47,13 @@ struct DanceCameraView: View {
                 .navigationTitle("Music")
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 10) {
-                        PlayerControls(camera: camera, music: camera.soundtrack, openCamera: { cameraOpen = true })
+                        PlayerControls(camera: camera, music: camera.soundtrack, identifierPrefix: "music",
+                                       openCamera: { cameraOpen = true })
                         if !libraryMessage.isEmpty { Text(libraryMessage).font(.caption) }
                         PhotoStatus(photos: camera.photos)
                     }.padding().background(.regularMaterial)
                 }
+                .accessibilityHidden(cameraOpen)
         }
         .fullScreenCover(isPresented: $cameraOpen, onDismiss: { camera.releaseCamera() }) {
             CameraStudio(camera: camera)
@@ -227,7 +229,8 @@ private struct CameraStudio: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             VStack(spacing: 6) {
-                PlayerControls(camera: camera, music: camera.soundtrack, editSpeed: { sheet = .details })
+                PlayerControls(camera: camera, music: camera.soundtrack, identifierPrefix: "studio",
+                               editSpeed: { sheet = .details })
                 if !camera.message.isEmpty && camera.phase != .recording {
                     Text(camera.message).font(.caption)
                 }
@@ -435,6 +438,7 @@ private struct FullscreenCamera: View {
 private struct PlayerControls: View {
     @ObservedObject var camera: DanceRecorder
     @ObservedObject var music: StreamingSoundtrack
+    let identifierPrefix: String
     var openCamera: (() -> Void)? = nil
     var editSpeed: (() -> Void)? = nil
 
@@ -447,13 +451,13 @@ private struct PlayerControls: View {
                         Image(systemName: active ? "pause.fill" : "play.fill")
                             .frame(width: 32, height: 32)
                             .accessibilityLabel(active ? "Pause" : "Play")
-                    }.buttonStyle(.bordered).accessibilityIdentifier("music.transport")
+                    }.buttonStyle(.bordered).accessibilityIdentifier("\(identifierPrefix).transport")
                     trackTitle.frame(maxWidth: .infinity, alignment: .leading)
                     if !camera.upcoming.isEmpty {
                         Button { camera.playNext() } label: {
                             Image(systemName: "forward.end.fill").frame(minWidth: 36, minHeight: 44).accessibilityLabel("Next song")
                         }
-                        .accessibilityIdentifier("music.next")
+                        .accessibilityIdentifier("\(identifierPrefix).next")
                     }
                     if let editSpeed {
                         Button(action: editSpeed) {
@@ -485,7 +489,7 @@ private struct PlayerControls: View {
 
     @ViewBuilder private var trackTitle: some View {
         let label = Text(music.title).font(.subheadline.weight(.semibold)).lineLimit(2)
-            .accessibilityIdentifier("music.track")
+            .accessibilityIdentifier("\(identifierPrefix).track")
         #if targetEnvironment(simulator) && DEBUG
         if ProcessInfo.processInfo.arguments.contains("-inspect-camera-continuity") {
             TimelineView(.periodic(from: .now, by: 0.5)) { _ in

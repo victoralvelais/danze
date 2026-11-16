@@ -8,16 +8,17 @@ final class LiveCameraUITests: XCTestCase {
         app.launch()
         let entry = app.buttons["camera.openStudio"]
         XCTAssertTrue(entry.waitForExistence(timeout: 12))
-        let track = app.staticTexts["music.track"]
-        func clock() -> (session: String, frame: Int64)? {
-            guard let value = track.value as? String else { return nil }
+        let libraryTrack = app.staticTexts["music.track"]
+        let studioTrack = app.staticTexts["studio.track"]
+        func clock(on track: XCUIElement) -> (session: String, frame: Int64)? {
+            guard track.exists, let value = track.value as? String else { return nil }
             let parts = value.split(separator: "|")
             guard parts.count == 2, let frame = Int64(parts[1]) else { return nil }
             return (String(parts[0]), frame)
         }
-        func waitForFrame(after previous: Int64) {
+        func waitForFrame(on track: XCUIElement, after previous: Int64) {
             let nextFrame = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
-                (clock()?.frame ?? -1) > previous
+                (clock(on: track)?.frame ?? -1) > previous
             }, object: nil)
             XCTAssertEqual(XCTWaiter.wait(for: [nextFrame], timeout: 15), .completed)
         }
@@ -27,8 +28,8 @@ final class LiveCameraUITests: XCTestCase {
             attachment.lifetime = .keepAlways
             add(attachment)
         }
-        waitForFrame(after: 0)
-        guard let before = clock() else { XCTFail("The playing WAV has no node clock."); return }
+        waitForFrame(on: libraryTrack, after: 0)
+        guard let before = clock(on: libraryTrack) else { XCTFail("The playing WAV has no node clock."); return }
         XCTAssertTrue(app.buttons["music.next"].exists)
         entry.tap()
         let shutter = app.buttons["camera.shutter"]
@@ -36,8 +37,9 @@ final class LiveCameraUITests: XCTestCase {
         XCTAssertEqual(shutter.label, "Record take")
         XCTAssertFalse(app.switches["Finish at original song tempo"].exists)
         XCTAssertEqual(app.buttons["camera.tempo"].value as? String, "0.75×")
-        waitForFrame(after: before.frame)
-        XCTAssertEqual(clock()?.session, before.session)
+        XCTAssertFalse(libraryTrack.exists)
+        waitForFrame(on: studioTrack, after: before.frame)
+        XCTAssertEqual(clock(on: studioTrack)?.session, before.session)
         savePreview("dance-camera-record-preview")
 
         let modes = app.segmentedControls["camera.mode"]
@@ -46,8 +48,8 @@ final class LiveCameraUITests: XCTestCase {
         XCTAssertTrue(app.buttons["camera.streamSetup"].exists)
         XCTAssertFalse(app.buttons["live.reveal"].exists)
         XCTAssertFalse(shutter.exists)
-        XCTAssertTrue(app.buttons["music.next"].exists)
-        XCTAssertEqual(clock()?.session, before.session)
+        XCTAssertTrue(app.buttons["studio.next"].exists)
+        XCTAssertEqual(clock(on: studioTrack)?.session, before.session)
         savePreview("dance-camera-stream-preview")
 
         app.buttons["camera.backToMusic"].tap()
@@ -59,9 +61,9 @@ final class LiveCameraUITests: XCTestCase {
         XCTAssertEqual(XCTWaiter.wait(for: [paused], timeout: 8), .completed)
         entry.tap()
         XCTAssertEqual(shutter.label, "Record take")
-        XCTAssertEqual(app.buttons["music.transport"].label, "Play")
-        XCTAssertTrue(app.buttons["music.next"].exists)
-        XCTAssertEqual(clock()?.session, before.session)
+        XCTAssertEqual(app.buttons["studio.transport"].label, "Play")
+        XCTAssertTrue(app.buttons["studio.next"].exists)
+        XCTAssertEqual(clock(on: studioTrack)?.session, before.session)
         app.buttons["camera.details"].tap()
         XCTAssertTrue(app.switches["Finish at original song tempo"].waitForExistence(timeout: 8))
         app.buttons["Done"].tap()
