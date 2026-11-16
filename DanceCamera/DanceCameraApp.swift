@@ -46,12 +46,14 @@ struct DanceCameraView: View {
             MusicLibrary(camera: camera, pickMusic: chooseMusic, pickFile: { choosing = true })
                 .navigationTitle("Music")
                 .safeAreaInset(edge: .bottom, spacing: 0) {
-                    VStack(spacing: 10) {
-                        PlayerControls(camera: camera, music: camera.soundtrack, identifierPrefix: "music",
-                                       openCamera: { cameraOpen = true })
-                        if !libraryMessage.isEmpty { Text(libraryMessage).font(.caption) }
-                        PhotoStatus(photos: camera.photos)
-                    }.padding().background(.regularMaterial)
+                    if !cameraOpen {
+                        VStack(spacing: 10) {
+                            PlayerControls(camera: camera, music: camera.soundtrack, identifierPrefix: "music",
+                                           openCamera: { cameraOpen = true })
+                            if !libraryMessage.isEmpty { Text(libraryMessage).font(.caption) }
+                            PhotoStatus(photos: camera.photos)
+                        }.padding().background(.regularMaterial)
+                    }
                 }
                 .accessibilityHidden(cameraOpen)
         }
