@@ -2,13 +2,15 @@ import ReplayKit
 import SwiftUI
 
 struct TikTokLiveSetup: View {
-    @ObservedObject private var camera: DanceRecorder
+    private let camera: DanceRecorder
     @ObservedObject private var music: StreamingSoundtrack
     @Environment(\.dismiss) private var dismiss
-    @Environment(\.scenePhase) private var scene
-    @Environment(\.isSceneCaptured) private var captured
-    @State private var captureBegan = false
-    @State private var waitingForMusic = false
+    @Environment(\.isSceneCaptured) private var sceneCaptured
+    @State private var captureEnded = false
+    #if targetEnvironment(simulator) && DEBUG
+    private static let simulatesCapture = ProcessInfo.processInfo.arguments.contains("-live-picker-capture-fixture")
+    @State private var fixtureCaptured = false
+    #endif
     let onShowCleanCamera: () -> Void
 
     init(camera: DanceRecorder, onShowCleanCamera: @escaping () -> Void) {
@@ -20,81 +22,88 @@ struct TikTokLiveSetup: View {
     private var playbackAction: String? {
         guard !music.title.isEmpty else { return nil }
         switch music.state {
-        case .paused: return "Resume music and show clean camera"
-        case .ended, .failed, .idle: return "Play music and show clean camera"
+        case .paused: return "Resume music"
+        case .ended, .failed, .idle: return "Play music"
         case .playing, .buffering: return nil
         }
     }
 
+    private var captured: Bool {
+        #if targetEnvironment(simulator) && DEBUG
+        if Self.simulatesCapture { return fixtureCaptured }
+        #endif
+        return sceneCaptured
+    }
+
     var body: some View {
         NavigationStack {
-            Form {
-                Section(captured ? "Broadcast controls" : "Start screen broadcast") {
+            VStack(spacing: 0) {
+                // The system control stays mounted outside Form's recyclable rows.
+                // Capture-state changes update the adjacent copy only.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(captured ? "Screen capture active" : captureEnded ? "Screen capture ended" : "Start screen broadcast")
+                        .font(.headline).accessibilityIdentifier("live.captureStatus")
                     HStack(spacing: 12) {
                         BroadcastPicker()
                             .frame(width: 52, height: 52)
                             .background(.quaternary, in: Circle())
-                            .accessibilityLabel(captured ? "Open broadcast controls" : "Start screen broadcast")
+                            .accessibilityLabel(captured || captureEnded ? "Open iPhone broadcast controls" : "Start screen broadcast")
                             .accessibilityIdentifier("live.startBroadcast")
-                        Text(captured ? "iOS is capturing this screen. Tap the broadcast button for system controls." :
-                            "Tap the broadcast button. Choose TikTok if listed, then confirm in iOS to share your screen.")
-                            .font(.subheadline)
-                    }
-                }
-                Section("Camera") {
-                    Button("Show clean camera") { onShowCleanCamera() }
-                        .accessibilityIdentifier("live.showCleanCamera")
-                    if let playbackAction {
-                        Button(playbackAction) {
-                            waitingForMusic = true
-                            camera.togglePlayback()
+                        if captureEnded {
+                            Text("Open LIVE in TikTok, choose Mobile gaming, and start sharing there. When TikTok confirms your LIVE, return here and tap Show clean camera.")
+                                .accessibilityIdentifier("live.captureRecovery")
+                        } else {
+                            Text(captured ? "Check your LIVE status in TikTok. When you’re ready, tap Show clean camera." :
+                                "Tap the broadcast button. Choose TikTok if listed and confirm in iOS. Check your LIVE status in TikTok.")
                         }
-                        .disabled(waitingForMusic)
                     }
-                    if waitingForMusic { ProgressView("Starting music") }
-                    if case .failed = music.state {
-                        Text("Music stopped. Tap Play music to restart the selected song.")
+                    .font(.subheadline)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding()
+                Form {
+                    Section("Camera") {
+                        Button("Show clean camera") { onShowCleanCamera() }
+                            .accessibilityIdentifier("live.showCleanCamera")
+                        if let playbackAction {
+                            Button(playbackAction) { camera.togglePlayback() }
+                        }
+                        if music.state == .buffering { ProgressView("Starting music") }
+                        if case .failed = music.state {
+                            Text("Music stopped. Tap Play music to restart the selected song.")
+                                .font(.footnote).foregroundStyle(.secondary)
+                        }
+                        Text("Tap the fullscreen picture to show the host controls.")
                             .font(.footnote).foregroundStyle(.secondary)
                     }
-                    Text("Tap the fullscreen picture to show the host controls.")
-                        .font(.footnote).foregroundStyle(.secondary)
-                }
-                Section("TikTok Mobile gaming") {
-                    Text(captured ? "Manage or end your TikTok LIVE in TikTok." :
-                        "If TikTok is missing from the picker or needs setup, open LIVE in TikTok and choose Mobile gaming. Start sharing there, then return to Dance Camera.")
-                }
-                Section("Try a private rehearsal") {
-                    Text("Open the clean camera and start Screen Recording from Control Center. Choose Photos as the destination. Stop recording and play it back to check the picture and music.")
+                    if !captureEnded {
+                        Section("TikTok Mobile gaming") {
+                            Text(captured ? "Manage or end your TikTok LIVE in TikTok." :
+                                "If TikTok is missing from the picker or needs setup, open LIVE in TikTok and choose Mobile gaming. Start sharing there, then return to Dance Camera.")
+                        }
+                    }
+                    Section("Try a private rehearsal") {
+                        Text("Open the clean camera and start Screen Recording from Control Center. Choose Photos as the destination. Stop recording and play it back to check the picture and music.")
+                    }
                 }
             }
             .navigationTitle("TikTok LIVE")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { ToolbarItem(placement: .cancellationAction) { Button("Close") { dismiss() } } }
-            // Only a transition while setup is open triggers the clean view.
-            // Returning to settings during an existing recording stays possible.
-            .onChange(of: captured) { _, active in
-                captureBegan = active
-                showCapturedCameraIfReady()
+            .onChange(of: captured) { wasCaptured, active in captureEnded = wasCaptured && !active }
+            #if targetEnvironment(simulator) && DEBUG
+            .task {
+                guard Self.simulatesCapture else { return }
+                do {
+                    try await Task.sleep(for: .seconds(1))
+                    fixtureCaptured = true
+                    try await Task.sleep(for: .seconds(3))
+                    fixtureCaptured = false
+                } catch { return }
             }
-            .onChange(of: scene) { _, _ in showCapturedCameraIfReady() }
-            .onChange(of: camera.ready) { _, _ in showCapturedCameraIfReady() }
-            .onChange(of: music.state) { _, state in
-                guard waitingForMusic else { return }
-                switch state {
-                case .playing:
-                    waitingForMusic = false
-                    if scene == .active { onShowCleanCamera() }
-                case .failed, .paused, .ended, .idle: waitingForMusic = false
-                case .buffering: break
-                }
-            }
+            #endif
         }
-    }
-
-    private func showCapturedCameraIfReady() {
-        guard captureBegan, captured, scene == .active, camera.ready, !waitingForMusic, playbackAction == nil else { return }
-        captureBegan = false
-        onShowCleanCamera()
+        .interactiveDismissDisabled()
     }
 }
 

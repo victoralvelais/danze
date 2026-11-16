@@ -4,7 +4,7 @@ final class LiveCameraUITests: XCTestCase {
     func testFullscreenHostingAndReturningToStudio() {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["-clean-camera-frame-fixture", "-live-overlay-song-fixture"]
+        app.launchArguments = ["-clean-camera-frame-fixture", "-live-overlay-song-fixture", "-live-picker-capture-fixture"]
         app.launch()
         app.buttons["Dance camera"].tap()
 
@@ -65,7 +65,14 @@ final class LiveCameraUITests: XCTestCase {
 
         // Exercise the original entry point and the reachable system broadcast control.
         app.buttons["TikTok LIVE setup"].tap()
-        XCTAssertTrue(app.descendants(matching: .any).matching(identifier: "live.startBroadcast").firstMatch.waitForExistence(timeout: 6))
+        let picker = app.descendants(matching: .any).matching(identifier: "live.startBroadcast").firstMatch
+        XCTAssertTrue(picker.waitForExistence(timeout: 6))
+        // A broadcast extension can stop immediately after the iOS screen capture
+        // starts. The setup must keep its picker mounted and give the host a retry path.
+        let recovery = app.descendants(matching: .any).matching(identifier: "live.captureRecovery").firstMatch
+        XCTAssertTrue(recovery.waitForExistence(timeout: 12))
+        XCTAssertTrue(picker.exists)
+        XCTAssertFalse(reveal.exists)
         app.buttons["live.showCleanCamera"].tap()
         XCTAssertTrue(reveal.waitForExistence(timeout: 6))
         XCTAssertEqual(hostButton("live.framing").value as? String, "Fit")
