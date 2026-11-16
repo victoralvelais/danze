@@ -1,11 +1,81 @@
 import XCTest
 
 final class LiveCameraUITests: XCTestCase {
+    func testOpenPreviewAndChangeModesWithTheSamePlayingOrPausedSong() {
+        continueAfterFailure = false
+        let app = XCUIApplication()
+        app.launchArguments = ["-live-overlay-song-fixture", "-inspect-camera-continuity"]
+        app.launch()
+        let entry = app.buttons["camera.openStudio"]
+        XCTAssertTrue(entry.waitForExistence(timeout: 12))
+        let track = app.staticTexts["music.track"]
+        func clock() -> (session: String, frame: Int64)? {
+            guard let value = track.value as? String else { return nil }
+            let parts = value.split(separator: "|")
+            guard parts.count == 2, let frame = Int64(parts[1]) else { return nil }
+            return (String(parts[0]), frame)
+        }
+        func waitForFrame(after previous: Int64) {
+            let nextFrame = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+                (clock()?.frame ?? -1) > previous
+            }, object: nil)
+            XCTAssertEqual(XCTWaiter.wait(for: [nextFrame], timeout: 15), .completed)
+        }
+        func savePreview(_ name: String) {
+            let attachment = XCTAttachment(screenshot: app.screenshot())
+            attachment.name = name
+            attachment.lifetime = .keepAlways
+            add(attachment)
+        }
+        waitForFrame(after: 0)
+        guard let before = clock() else { XCTFail("The playing WAV has no node clock."); return }
+        XCTAssertTrue(app.buttons["music.next"].exists)
+        entry.tap()
+        let shutter = app.buttons["camera.shutter"]
+        XCTAssertTrue(shutter.waitForExistence(timeout: 8))
+        XCTAssertEqual(shutter.label, "Record take")
+        XCTAssertFalse(app.switches["Finish at original song tempo"].exists)
+        XCTAssertEqual(app.buttons["camera.tempo"].value as? String, "0.75×")
+        waitForFrame(after: before.frame)
+        XCTAssertEqual(clock()?.session, before.session)
+        savePreview("dance-camera-record-preview")
+
+        let modes = app.segmentedControls["camera.mode"]
+        modes.buttons["Stream"].tap()
+        XCTAssertTrue(app.buttons["live.fullscreen"].exists)
+        XCTAssertTrue(app.buttons["camera.streamSetup"].exists)
+        XCTAssertFalse(app.buttons["live.reveal"].exists)
+        XCTAssertFalse(shutter.exists)
+        XCTAssertTrue(app.buttons["music.next"].exists)
+        XCTAssertEqual(clock()?.session, before.session)
+        savePreview("dance-camera-stream-preview")
+
+        app.buttons["camera.backToMusic"].tap()
+        XCTAssertTrue(entry.waitForExistence(timeout: 8))
+        XCTAssertEqual(app.buttons["music.transport"].label, "Pause")
+        app.buttons["music.transport"].tap()
+        let paused = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == 'Play'"),
+                                               object: app.buttons["music.transport"])
+        XCTAssertEqual(XCTWaiter.wait(for: [paused], timeout: 8), .completed)
+        entry.tap()
+        XCTAssertEqual(shutter.label, "Record take")
+        XCTAssertEqual(app.buttons["music.transport"].label, "Play")
+        XCTAssertTrue(app.buttons["music.next"].exists)
+        XCTAssertEqual(clock()?.session, before.session)
+        app.buttons["camera.details"].tap()
+        XCTAssertTrue(app.switches["Finish at original song tempo"].waitForExistence(timeout: 8))
+        app.buttons["Done"].tap()
+        app.buttons["camera.backToMusic"].tap()
+        XCTAssertTrue(entry.waitForExistence(timeout: 8))
+        XCTAssertEqual(app.buttons["music.transport"].label, "Play")
+    }
+
     func testFullscreenControlsHideAfterInactivity() {
         let app = XCUIApplication()
         app.launchArguments = ["-clean-camera-frame-fixture"]
         app.launch()
-        app.buttons["Dance camera"].tap()
+        app.buttons["camera.openStudio"].tap()
+        app.segmentedControls["camera.mode"].buttons["Stream"].tap()
         app.buttons["live.fullscreen"].tap()
         app.buttons["live.reveal"].tap()
         let exit = app.buttons["live.exit"]
@@ -13,7 +83,7 @@ final class LiveCameraUITests: XCTestCase {
         let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: exit)
         XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 18), .completed)
         XCTAssertTrue(app.buttons["live.reveal"].exists)
-        XCTAssertFalse(app.buttons["Record take"].exists)
+        XCTAssertFalse(app.buttons["camera.shutter"].exists)
     }
 
     func testFullscreenHostingAndReturningToStudio() {
@@ -22,7 +92,10 @@ final class LiveCameraUITests: XCTestCase {
         app.launchArguments = ["-clean-camera-frame-fixture", "-live-overlay-song-fixture",
                                "-live-picker-capture-fixture", "-inspect-live-host-controls"]
         app.launch()
-        app.buttons["Dance camera"].tap()
+        app.buttons["camera.openStudio"].tap()
+        let modes = app.segmentedControls["camera.mode"]
+        XCTAssertEqual(app.buttons["camera.shutter"].label, "Record take")
+        modes.buttons["Stream"].tap()
 
         let fullscreen = app.buttons["live.fullscreen"]
         XCTAssertTrue(fullscreen.waitForExistence(timeout: 12))
@@ -41,7 +114,7 @@ final class LiveCameraUITests: XCTestCase {
         }
 
         XCTAssertTrue(reveal.waitForExistence(timeout: 6))
-        XCTAssertFalse(app.buttons["Record take"].exists)
+        XCTAssertFalse(app.buttons["camera.shutter"].exists)
         XCTAssertFalse(exit.exists)
         XCTAssertFalse(song.exists)
         let framing = hostButton("live.framing")
@@ -79,10 +152,12 @@ final class LiveCameraUITests: XCTestCase {
         XCTAssertTrue(reveal.waitForExistence(timeout: 6))
         hostButton("live.exit").tap()
         XCTAssertTrue(fullscreen.waitForExistence(timeout: 6))
-        XCTAssertTrue(app.buttons["Record take"].exists)
+        modes.buttons["Record"].tap()
+        XCTAssertEqual(app.buttons["camera.shutter"].label, "Record take")
+        modes.buttons["Stream"].tap()
 
         // Exercise the original entry point and the reachable system broadcast control.
-        app.buttons["TikTok LIVE setup"].tap()
+        app.buttons["camera.streamSetup"].tap()
         let picker = app.descendants(matching: .any).matching(identifier: "live.startBroadcast").firstMatch
         XCTAssertTrue(picker.waitForExistence(timeout: 6))
         // A broadcast extension can stop immediately after the iOS screen capture

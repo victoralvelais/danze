@@ -47,12 +47,9 @@ struct DanceCameraView: View {
                 .navigationTitle("Music")
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     VStack(spacing: 10) {
-                        PlayerControls(camera: camera, music: camera.soundtrack)
+                        PlayerControls(camera: camera, music: camera.soundtrack, openCamera: { cameraOpen = true })
                         if !libraryMessage.isEmpty { Text(libraryMessage).font(.caption) }
                         PhotoStatus(photos: camera.photos)
-                        Button { cameraOpen = true } label: {
-                            Label("Dance camera", systemImage: "video.fill").frame(maxWidth: .infinity)
-                        }.buttonStyle(.borderedProminent)
                     }.padding().background(.regularMaterial)
                 }
         }
@@ -77,6 +74,10 @@ struct DanceCameraView: View {
             if ProcessInfo.processInfo.arguments.contains("-live-overlay-song-fixture"),
                camera.soundtrack.title.isEmpty, FileManager.default.fileExists(atPath: file.path) {
                 try? camera.selectFile(file)
+                if ProcessInfo.processInfo.arguments.contains("-inspect-camera-continuity") {
+                    camera.enqueueRehearsalRepeat(of: file)
+                    camera.changeSpeed(0.75)
+                }
             }
         }
         #endif
@@ -132,12 +133,19 @@ private struct SystemMusicPicker: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: MPMediaPickerController, context: Context) {}
 }
 
+private enum StudioMode: String, CaseIterable { case record = "Record", stream = "Stream" }
+private enum StudioSheet: String, Identifiable {
+    case details, streamSetup
+    var id: Self { self }
+}
+
 private struct CameraStudio: View {
     @ObservedObject var camera: DanceRecorder
     @Environment(\.dismiss) private var dismiss
     @Environment(\.scenePhase) private var scene
     @State private var previousIdleTimer: Bool?
-    @State private var liveSetup = false
+    @State private var mode = StudioMode.record
+    @State private var sheet: StudioSheet?
     @State private var cleanCamera = false
 
     var body: some View {
@@ -150,12 +158,18 @@ private struct CameraStudio: View {
         }
         .statusBarHidden(cleanCamera)
         .persistentSystemOverlays(cleanCamera ? .hidden : .automatic)
-        .sheet(isPresented: $liveSetup) {
-            TikTokLiveSetup(camera: camera, onShowCleanCamera: {
-                liveSetup = false
-                cleanCamera = true
-            })
+        .sheet(item: $sheet) { presented in
+            switch presented {
+            case .details:
+                CameraDetails(camera: camera, music: camera.soundtrack)
+            case .streamSetup:
+                TikTokLiveSetup(camera: camera, onShowCleanCamera: {
+                    sheet = nil
+                    cleanCamera = true
+                })
+            }
         }
+        .preferredColorScheme(.dark)
         .interactiveDismissDisabled(camera.phase != .idle || cleanCamera)
         .task { if scene == .active { await camera.configure() } }
         .onChange(of: scene, initial: true) { _, phase in
@@ -164,54 +178,82 @@ private struct CameraStudio: View {
                 // TikTok setup temporarily takes the camera and can pause the music.
                 // On return, let the performer resume before hiding the controls.
                 cleanCamera = false
-                liveSetup = true
+                sheet = .streamSetup
             }
         }
         .onDisappear { setScreenAwake(false) }
     }
 
     private var studio: some View {
-        VStack(spacing: 12) {
+        VStack(spacing: 8) {
             HStack {
                 Button { dismiss() } label: { Label("Music", systemImage: "chevron.left") }
                     .disabled(camera.phase != .idle)
+                    .accessibilityIdentifier("camera.backToMusic")
                 Spacer()
-                if camera.phase == .recording { Label("Recording", systemImage: "record.circle").foregroundStyle(.red) }
-                Button { liveSetup = true } label: { Label("LIVE", systemImage: "dot.radiowaves.left.and.right") }
-                    .disabled(camera.phase != .idle)
-                    .accessibilityLabel("TikTok LIVE setup")
-                if camera.hasOtherCamera {
-                    Button { Task { await camera.switchCamera() } } label: {
-                        Image(systemName: "camera.rotate").frame(width: 44, height: 44)
-                    }
-                    .accessibilityLabel(camera.position == .back ? "Switch to front camera" : "Switch to rear camera")
-                    .disabled(!camera.ready || camera.configuring || camera.phase != .idle)
+                Picker("Camera mode", selection: $mode) {
+                    ForEach(StudioMode.allCases, id: \.self) { Text($0.rawValue).tag($0) }
                 }
+                .pickerStyle(.segmented).frame(maxWidth: 200)
+                .disabled(camera.phase != .idle)
+                .accessibilityIdentifier("camera.mode")
+                Spacer()
+                Button { sheet = .details } label: {
+                    Image(systemName: "slider.horizontal.3").frame(width: 44, height: 44)
+                }
+                .accessibilityLabel("Camera details").accessibilityIdentifier("camera.details")
             }
+            .padding(.horizontal, 12)
             ZStack {
                 Color.black
                 if camera.ready { Preview(session: camera.session, position: camera.position, configuring: camera.configuring) }
             }
-            .overlay(alignment: .bottomTrailing) {
-                Button { cleanCamera = true } label: {
-                    Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
-                        .font(.subheadline.weight(.semibold)).padding(.horizontal, 12).frame(minHeight: 44)
-                        .background(.black.opacity(0.75), in: Capsule())
+            .overlay(alignment: .topTrailing) {
+                if camera.hasOtherCamera {
+                    Button { Task { await camera.switchCamera() } } label: {
+                        Image(systemName: "camera.rotate").frame(width: 44, height: 44)
+                            .background(.black.opacity(0.65), in: Circle())
+                    }
+                    .accessibilityLabel(camera.position == .back ? "Switch to front camera" : "Switch to rear camera")
+                    .disabled(!camera.ready || camera.configuring || camera.phase != .idle)
+                    .padding(8)
                 }
-                .foregroundStyle(.white).buttonStyle(.plain)
-                .disabled(camera.phase != .idle)
-                .accessibilityIdentifier("live.fullscreen")
-                .padding(8)
             }
-            .clipShape(RoundedRectangle(cornerRadius: 14))
-            PlayerControls(camera: camera, music: camera.soundtrack)
-            Toggle("Finish at original song tempo", isOn: $camera.originalTempo)
-                .font(.subheadline).disabled(camera.phase != .idle)
-            if !camera.message.isEmpty { Text(camera.message).font(.caption) }
-            PhotoStatus(photos: camera.photos)
-            shutter
+            .overlay(alignment: .topLeading) {
+                if camera.phase == .recording {
+                    Label("Recording", systemImage: "record.circle.fill")
+                        .font(.subheadline.weight(.bold)).padding(8).background(.black.opacity(0.7), in: Capsule()).padding(8)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            VStack(spacing: 6) {
+                PlayerControls(camera: camera, music: camera.soundtrack, editSpeed: { sheet = .details })
+                if !camera.message.isEmpty && camera.phase != .recording {
+                    Text(camera.message).font(.caption)
+                }
+                if mode == .record {
+                    PhotoStatus(photos: camera.photos)
+                    shutter
+                } else {
+                    Text("Start Mobile gaming in TikTok, then return to share the fullscreen camera.")
+                        .font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center)
+                    HStack {
+                        Button { sheet = .streamSetup } label: {
+                            Label("TikTok setup", systemImage: "dot.radiowaves.left.and.right")
+                                .frame(maxWidth: .infinity, minHeight: 32)
+                        }
+                        .buttonStyle(.bordered).accessibilityIdentifier("camera.streamSetup")
+                        Button { cleanCamera = true } label: {
+                            Label("Full Screen", systemImage: "arrow.up.left.and.arrow.down.right")
+                                .frame(maxWidth: .infinity, minHeight: 32)
+                        }
+                        .buttonStyle(.borderedProminent).accessibilityIdentifier("live.fullscreen")
+                    }
+                }
+            }
+            .padding(.horizontal, 16).padding(.bottom, 6)
         }
-        .padding()
+        .background(Color.black)
     }
 
     private var shutter: some View {
@@ -235,8 +277,9 @@ private struct CameraStudio: View {
             .contentShape(Circle())
         }
         .buttonStyle(.plain)
-        .disabled(!canStop && (!camera.ready || camera.configuring || saving))
+        .disabled(!canStop && !camera.canStartRecording)
         .accessibilityLabel(saving ? "Saving take" : canStop ? "Stop and save take" : "Record take")
+        .accessibilityIdentifier("camera.shutter")
     }
 
     private func setScreenAwake(_ awake: Bool) {
@@ -392,48 +435,120 @@ private struct FullscreenCamera: View {
 private struct PlayerControls: View {
     @ObservedObject var camera: DanceRecorder
     @ObservedObject var music: StreamingSoundtrack
+    var openCamera: (() -> Void)? = nil
+    var editSpeed: (() -> Void)? = nil
+
     var body: some View {
         if !music.title.isEmpty {
             VStack(spacing: 5) {
-                HStack {
+                HStack(spacing: 8) {
                     Button { camera.togglePlayback() } label: {
                         let active = music.state == .playing || music.state == .buffering
                         Image(systemName: active ? "pause.fill" : "play.fill")
+                            .frame(width: 32, height: 32)
                             .accessibilityLabel(active ? "Pause" : "Play")
-                    }.buttonStyle(.bordered)
-                    Text(music.title).font(.headline).lineLimit(2)
-                    Spacer()
+                    }.buttonStyle(.bordered).accessibilityIdentifier("music.transport")
+                    trackTitle.frame(maxWidth: .infinity, alignment: .leading)
                     if !camera.upcoming.isEmpty {
-                        Button { camera.playNext() } label: { Image(systemName: "forward.end.fill").accessibilityLabel("Next song") }
+                        Button { camera.playNext() } label: {
+                            Image(systemName: "forward.end.fill").frame(minWidth: 36, minHeight: 44).accessibilityLabel("Next song")
+                        }
+                        .accessibilityIdentifier("music.next")
                     }
+                    if let editSpeed {
+                        Button(action: editSpeed) {
+                            Text(String(format: "%.2f×", camera.speed)).font(.subheadline.monospacedDigit())
+                                .padding(.horizontal, 9).frame(minHeight: 44)
+                        }
+                        .accessibilityLabel("Dance tempo").accessibilityValue(String(format: "%.2f×", camera.speed))
+                        .accessibilityIdentifier("camera.tempo")
+                    }
+                    if let openCamera { cameraButton(openCamera) }
                 }
-                HStack {
-                    Text("Speed").font(.caption)
-                    Slider(value: Binding(get: { camera.speed }, set: { camera.changeSpeed($0) }),
-                           in: 0.5...2, step: 0.01).accessibilityLabel("Song speed")
-                    Button { camera.changeSpeed(1) } label: {
-                        Text(String(format: "%.2f×", camera.speed)).font(.subheadline.monospacedDigit())
-                    }.accessibilityHint("Reset song speed")
-                }
+                if editSpeed == nil { SpeedControls(camera: camera) }
                 if music.state == .buffering { ProgressView("Buffering audio").font(.caption) }
                 if case let .failed(problem) = music.state { Text(problem).font(.caption).foregroundStyle(.red) }
             }
+        } else if let openCamera {
+            cameraButton(openCamera)
         }
+    }
+
+    private func cameraButton(_ open: @escaping () -> Void) -> some View {
+        Button(action: open) {
+            Label("Camera", systemImage: "camera").frame(minHeight: 32)
+        }
+        .buttonStyle(.borderedProminent)
+        .accessibilityHint("Open the camera preview")
+        .accessibilityIdentifier("camera.openStudio")
+    }
+
+    @ViewBuilder private var trackTitle: some View {
+        let label = Text(music.title).font(.subheadline.weight(.semibold)).lineLimit(2)
+            .accessibilityIdentifier("music.track")
+        #if targetEnvironment(simulator) && DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-inspect-camera-continuity") {
+            TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                label.accessibilityValue(music.rehearsalClock())
+            }
+        } else { label }
+        #else
+        label
+        #endif
+    }
+}
+
+private struct SpeedControls: View {
+    @ObservedObject var camera: DanceRecorder
+    var body: some View {
+        HStack {
+            Text("Speed").font(.caption)
+            Slider(value: Binding(get: { camera.speed }, set: { camera.changeSpeed($0) }),
+                   in: 0.5...2, step: 0.01).accessibilityLabel("Song speed")
+            Button { camera.changeSpeed(1) } label: {
+                Text(String(format: "%.2f×", camera.speed)).font(.subheadline.monospacedDigit())
+            }.accessibilityHint("Reset song speed")
+        }
+    }
+}
+
+private struct CameraDetails: View {
+    @ObservedObject var camera: DanceRecorder
+    @ObservedObject var music: StreamingSoundtrack
+    @Environment(\.dismiss) private var dismiss
+    var body: some View {
+        NavigationStack {
+            Form {
+                if !music.title.isEmpty {
+                    Section("Playback") { SpeedControls(camera: camera) }
+                }
+                Section("Saved takes") {
+                    Toggle("Finish at original song tempo", isOn: $camera.originalTempo)
+                        .disabled(camera.phase != .idle)
+                    PhotoStatus(photos: camera.photos, showDetails: true)
+                }
+            }
+            .navigationTitle("Camera details")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+        }
+        .presentationDetents([.medium, .large])
     }
 }
 
 private struct PhotoStatus: View {
     @ObservedObject var photos: PhotoDelivery
+    var showDetails = false
     var body: some View {
         VStack(spacing: 3) {
             if !photos.notice.isEmpty { Text(photos.notice).font(.caption) }
-            if let report = photos.latestAudioReport {
+            if showDetails, let report = photos.latestAudioReport {
                 ShareLink("Share latest audio report", item: report).font(.caption)
             }
             if photos.pendingCount > 0 && !photos.delivering {
                 Button("Retry saving to Photos") { Task { await photos.save() } }
             }
-            if photos.previousCount > 0 {
+            if showDetails, photos.previousCount > 0 {
                 Button("Move \(photos.previousCount) previous clips to Photos") {
                     Task { await photos.save(includePrevious: true) }
                 }.disabled(photos.delivering)

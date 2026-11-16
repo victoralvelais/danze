@@ -59,6 +59,9 @@ final class StreamingSoundtrack: ObservableObject {
     func beginTake(restoreTempo: Bool) throws { try player.beginTake(restoreTempo: restoreTempo) }
     func stoppingCamera() { player.stoppingCamera() }
     func performedAudio() -> AsyncThrowingStream<PerformedAudioEvent, Error> { player.feed.samples() }
+    #if targetEnvironment(simulator) && DEBUG
+    func rehearsalClock() -> String { player.rehearsalClock() }
+    #endif
 
     func finishTake() async throws -> SoundtrackTake? { try await player.finishTake() }
     func discardTake() { player.discardTake() }
@@ -101,6 +104,16 @@ private final class SoundtrackPlayer: NSObject, URLSessionDataDelegate, @uncheck
     private var libraryReader: LibraryPCMReader?
     private var configurationObserver: NSObjectProtocol?
     private var routeObserver: NSObjectProtocol?
+
+    #if targetEnvironment(simulator) && DEBUG
+    func rehearsalClock() -> String {
+        queue.sync {
+            let time = configured ? node.lastRenderTime.flatMap { node.playerTime(forNodeTime: $0) } : nil
+            let frame = (time?.isSampleTimeValid == true ? time?.sampleTime : nil) ?? -1
+            return "\(playbackID.uuidString)|\(frame)"
+        }
+    }
+    #endif
 
     override init() {
         super.init()

@@ -54,7 +54,7 @@ struct TikTokLiveSetup: View {
                                 .accessibilityIdentifier("live.captureRecovery")
                         } else {
                             Text(captured ? "Check your LIVE status in TikTok. When you’re ready, tap Show clean camera." :
-                                "Tap the broadcast button. Choose TikTok if listed and confirm in iOS. Check your LIVE status in TikTok.")
+                                "Start Mobile gaming from LIVE in TikTok. Confirm Start Broadcast in iOS, then return here. This button opens the iPhone broadcast controls.")
                         }
                     }
                     .font(.subheadline)
@@ -78,8 +78,8 @@ struct TikTokLiveSetup: View {
                     }
                     if !captureEnded {
                         Section("TikTok Mobile gaming") {
-                            Text(captured ? "Manage or end your TikTok LIVE in TikTok." :
-                                "If TikTok is missing from the picker or needs setup, open LIVE in TikTok and choose Mobile gaming. Start sharing there, then return to Dance Camera.")
+                            Text(captured ? "If you’re LIVE on TikTok, manage or end the session there." :
+                                "TikTok confirms when your audience can watch. Once sharing, tap Show clean camera to present your picture and music.")
                         }
                     }
                     Section("Try a private rehearsal") {

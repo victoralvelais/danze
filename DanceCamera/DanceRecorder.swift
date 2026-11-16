@@ -46,6 +46,10 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     private var restoreTempo = false
     private var pendingStop = false
 
+    var canStartRecording: Bool {
+        wantsCamera && phase == .idle && ready && !configuring && cleanFrames == nil && !restoringCleanFrames
+    }
+
     func configure() async {
         wantsCamera = true
         guard !ready, !configuring, cleanFrames == nil, !restoringCleanFrames else { return }
@@ -241,10 +245,21 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
 
     func selectStream(_ request: URLRequest, title: String, key: String, enqueue: Bool) {
         if enqueue, current != nil, [.playing, .buffering, .paused].contains(soundtrack.state) {
-            next.append((.stream(request, title), key))
-            upcoming.append(title)
+            appendToQueue(.stream(request, title), key: key, title: title)
         } else { start(.stream(request, title), key: key) }
     }
+
+    private func appendToQueue(_ source: Source, key: String, title: String) {
+        next.append((source, key))
+        upcoming.append(title)
+    }
+
+    #if targetEnvironment(simulator) && DEBUG
+    func enqueueRehearsalRepeat(of original: URL) {
+        guard case let .file(url, title)? = current else { return }
+        appendToQueue(.file(url, title), key: "file:" + original.absoluteString, title: title)
+    }
+    #endif
 
     private func start(_ source: Source, key: String) {
         let previous = current
@@ -298,7 +313,7 @@ final class DanceRecorder: NSObject, ObservableObject, AVCaptureFileOutputRecord
     }
 
     func record() {
-        guard wantsCamera, phase == .idle, ready, !configuring, cleanFrames == nil, !restoringCleanFrames else { return }
+        guard canStartRecording else { return }
         guard session.isRunning else { message = "Camera unavailable. Return to the app and try again."; return }
         do {
             try soundtrack.beginTake(restoreTempo: originalTempo)

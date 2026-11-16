@@ -98,12 +98,32 @@ jobs:
           xcrun simctl io "$device" recordVideo --codec=h264 "$movie" &
           recorder=$!
           trap 'kill -INT "$recorder" 2>/dev/null || true' EXIT
-          xcodebuild "${settings[@]}" test-without-building
+          xcodebuild "${settings[@]}" -resultBundlePath "$RUNNER_TEMP/camera-tests.xcresult" test-without-building
           kill -INT "$recorder"
           wait "$recorder" || test -s "$movie"
           trap - EXIT
           xcrun swiftc -parse-as-library -target "$(uname -m)-apple-macos15.0" Checks/CheckRehearsalMovie.swift -o "$RUNNER_TEMP/check-rehearsal"
           "$RUNNER_TEMP/check-rehearsal" "$movie"
+
+      - name: Export the tested camera screens
+        if: ${{ !cancelled() && steps.rehearsal.conclusion != 'skipped' }}
+        continue-on-error: true
+        run: |
+          xcrun xcresulttool export attachments --path "$RUNNER_TEMP/camera-tests.xcresult" --output-path "$RUNNER_TEMP/camera-screens"
+
+      - name: Keep the simulator screenshots
+        if: ${{ !cancelled() && steps.rehearsal.conclusion != 'skipped' }}
+        continue-on-error: true
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: camera-screens
+          path: |
+            ${{ runner.temp }}/camera-screens/manifest.json
+            ${{ runner.temp }}/camera-screens/*.png
+            ${{ runner.temp }}/camera-screens/*.jpg
+            ${{ runner.temp }}/camera-screens/*.jpeg
+          retention-days: 3
+          if-no-files-found: ignore
 
       - name: Keep the synthetic rehearsal movie for a failed picture check
         if: failure() && steps.rehearsal.outcome == 'failure'
