@@ -305,6 +305,11 @@ private struct FullscreenCamera: View {
         .sheet(isPresented: $microphone) { BroadcastMicrophoneSheet() }
         .task(id: activity) {
             guard controls, !voiceOver, !microphone, scene == .active else { return }
+            #if targetEnvironment(simulator) && DEBUG
+            // Accessibility queries on the CI simulator can take longer than the
+            // panel timeout. A separate UI test exercises the normal five seconds.
+            if ProcessInfo.processInfo.arguments.contains("-inspect-live-host-controls") { return }
+            #endif
             do { try await Task.sleep(for: .seconds(5)) } catch { return }
             guard !Task.isCancelled else { return }
             controls = false

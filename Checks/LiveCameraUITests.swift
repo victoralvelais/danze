@@ -1,10 +1,26 @@
 import XCTest
 
 final class LiveCameraUITests: XCTestCase {
+    func testFullscreenControlsHideAfterInactivity() {
+        let app = XCUIApplication()
+        app.launchArguments = ["-clean-camera-frame-fixture"]
+        app.launch()
+        app.buttons["Dance camera"].tap()
+        app.buttons["live.fullscreen"].tap()
+        app.buttons["live.reveal"].tap()
+        let exit = app.buttons["live.exit"]
+        XCTAssertTrue(exit.exists)
+        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: exit)
+        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 18), .completed)
+        XCTAssertTrue(app.buttons["live.reveal"].exists)
+        XCTAssertFalse(app.buttons["Record take"].exists)
+    }
+
     func testFullscreenHostingAndReturningToStudio() {
         continueAfterFailure = false
         let app = XCUIApplication()
-        app.launchArguments = ["-clean-camera-frame-fixture", "-live-overlay-song-fixture", "-live-picker-capture-fixture"]
+        app.launchArguments = ["-clean-camera-frame-fixture", "-live-overlay-song-fixture",
+                               "-live-picker-capture-fixture", "-inspect-live-host-controls"]
         app.launch()
         app.buttons["Dance camera"].tap()
 
@@ -17,8 +33,10 @@ final class LiveCameraUITests: XCTestCase {
 
         func hostButton(_ id: String) -> XCUIElement {
             let button = app.buttons[id]
-            if !button.exists { reveal.tap() }
-            XCTAssertTrue(button.waitForExistence(timeout: 4))
+            if !button.exists {
+                reveal.tap()
+                XCTAssertTrue(button.waitForExistence(timeout: 8), id)
+            }
             return button
         }
 
@@ -34,9 +52,9 @@ final class LiveCameraUITests: XCTestCase {
         XCTAssertTrue(song.waitForExistence(timeout: 10))
         XCTAssertTrue(song.label.contains("Live Rehearsal"), song.label)
 
-        // The ticker stays on the audience picture when the host panel times out.
-        let hidden = XCTNSPredicateExpectation(predicate: NSPredicate(format: "exists == false"), object: exit)
-        XCTAssertEqual(XCTWaiter.wait(for: [hidden], timeout: 14), .completed)
+        // The ticker remains on the audience picture with the host panel hidden.
+        hostButton("live.hide").tap()
+        XCTAssertFalse(exit.exists)
         XCTAssertTrue(song.exists)
 
         hostButton("live.playback").tap()
